@@ -1,0 +1,6 @@
+{
+  "_kommentar": "Beispiel für eine config.json – Alternative zur .env. Wird von test/config.test.js genutzt.",
+  "defaultReminders": "3d,45m",
+  "selectCategory": "Aushang",
+  "timezone": "Europe/Berlin"
+}

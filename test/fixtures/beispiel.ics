@@ -1,0 +1,76 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//chatendar//Beispielkalender//DE
+CALSCALE:GREGORIAN
+X-WR-CALNAME:chatendar Beispiel
+
+BEGIN:VEVENT
+UID:elternabend@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;TZID=Europe/Berlin:20260920T183000
+DTEND;TZID=Europe/Berlin:20260920T200000
+SUMMARY:[WA] Elternabend Klasse 4b
+LOCATION:Aula der Grundschule
+DESCRIPTION:Markiert über das Titel-Präfix. Eigene Vorlaufzeiten via X-WA-REMIND.
+X-WA-REMIND:1d,2h
+END:VEVENT
+
+BEGIN:VEVENT
+UID:vereinssitzung@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;TZID=Europe/Berlin:20260920T190000
+DTEND;TZID=Europe/Berlin:20260920T203000
+SUMMARY:Vereinssitzung
+LOCATION:Clubheim
+CATEGORIES:WhatsApp,Verein
+DESCRIPTION:Markiert über die Kategorie. Nutzt die Default-Vorlaufzeiten.
+END:VEVENT
+
+BEGIN:VEVENT
+UID:chorprobe@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;TZID=Europe/Berlin:20260919T210000
+DTEND;TZID=Europe/Berlin:20260919T223000
+SUMMARY:[WA] Chorprobe
+CATEGORIES:WhatsApp
+DESCRIPTION:Ohne LOCATION - zeigt, dass die Ortszeile im Template entfällt.
+X-WA-REMIND:2h
+END:VEVENT
+
+BEGIN:VEVENT
+UID:sommerfest@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;VALUE=DATE:20260926
+DTEND;VALUE=DATE:20260927
+SUMMARY:Sommerfest
+LOCATION:Vereinsgelände
+CATEGORIES:WhatsApp
+DESCRIPTION:Ganztägiger Termin - in der Nachricht ohne Uhrzeit.
+X-WA-REMIND:2d
+END:VEVENT
+
+BEGIN:VEVENT
+UID:training@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;TZID=Europe/Berlin:20260918T190000
+DTEND;TZID=Europe/Berlin:20260918T203000
+SUMMARY:[WA] Training
+LOCATION:Sporthalle
+RRULE:FREQ=WEEKLY;BYDAY=FR;COUNT=4
+EXDATE;TZID=Europe/Berlin:20260925T190000
+DESCRIPTION:Serientermin. Der 25.09. fällt aus (EXDATE).
+X-WA-REMIND:1d
+END:VEVENT
+
+BEGIN:VEVENT
+UID:zahnarzt@chatendar.example
+DTSTAMP:20260901T080000Z
+DTSTART;TZID=Europe/Berlin:20260921T091500
+DTEND;TZID=Europe/Berlin:20260921T100000
+SUMMARY:Zahnarzt
+LOCATION:Praxis Dr. Meier
+CATEGORIES:Privat
+DESCRIPTION:Nicht markiert - wird ignoriert.
+END:VEVENT
+
+END:VCALENDAR

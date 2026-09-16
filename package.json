@@ -1,0 +1,32 @@
+{
+  "name": "chatendar",
+  "version": "1.0.0",
+  "description": "Erinnerungsbot: liest Termine aus einem Kalender und schickt Sammel-Erinnerungen in eine WhatsApp-Gruppe",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "node src/index.js --dry-run",
+    "pair": "node src/pair.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "keywords": [
+    "whatsapp",
+    "calendar",
+    "ics",
+    "reminder",
+    "baileys"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
+    "node-ical": "^0.20.1",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
