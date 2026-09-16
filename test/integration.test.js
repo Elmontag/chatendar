@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,13 +24,26 @@ function neuerStatePfad() {
   return path.join(dir, 'state.db');
 }
 
-/** Einen Durchlauf starten und stdout+stderr zurückgeben. */
+/**
+ * Leeres Arbeitsverzeichnis für die Testläufe.
+ *
+ * Wichtig: NICHT das Projektverzeichnis verwenden – sonst würde eine lokal
+ * vorhandene .env/config.json in die Tests hineinwirken und sie je nach
+ * Entwicklerrechner unterschiedlich ausfallen lassen.
+ */
+const SAUBERES_CWD = fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-cwd-'));
+tempDirs.push(SAUBERES_CWD);
+
+/**
+ * Einen Durchlauf starten und stdout UND stderr zurückgeben.
+ * Warnungen landen auf stderr – die Tests sollen sie sehen.
+ */
 function lauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}) {
-  return execFileSync(
+  const ergebnis = spawnSync(
     process.execPath,
     [path.join(REPO_ROOT, 'src', 'index.js'), `--now=${now}`, '--dry-run', ...args],
     {
-      cwd: REPO_ROOT,
+      cwd: SAUBERES_CWD,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
@@ -46,6 +59,11 @@ function lauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}
       },
     },
   );
+
+  if (ergebnis.status !== 0) {
+    throw new Error(`Lauf endete mit Code ${ergebnis.status}:\n${ergebnis.stderr}`);
+  }
+  return `${ergebnis.stdout}${ergebnis.stderr}`;
 }
 
 describe('Kompletter Dry-Run gegen beispiel.ics', () => {
@@ -112,13 +130,113 @@ describe('Prüffenster', () => {
   });
 });
 
+describe('Wochenübersicht', () => {
+  const digestEnv = { DIGEST_ENABLED: 'true', DIGEST_DAY: 'fr', DIGEST_TIME: '18:00' };
+
+  it('verschickt am Versandzeitpunkt eine Liste der kommenden Woche', () => {
+    // Freitag, 18.09.2026, 18:00 Berlin
+    const ausgabe = lauf({ now: '2026-09-18T16:00:00Z', env: digestEnv });
+
+    assert.match(ausgabe, /Wochenübersicht fällig/);
+    assert.match(ausgabe, /Termine der kommenden Woche/);
+    assert.match(ausgabe, /Vereinssitzung/);
+  });
+
+  it('läuft nicht an einem anderen Wochentag', () => {
+    const ausgabe = lauf({ now: '2026-09-16T16:00:00Z', env: digestEnv }); // Mittwoch
+    assert.doesNotMatch(ausgabe, /Termine der kommenden Woche/);
+  });
+
+  it('verschickt sie pro Woche nur einmal', () => {
+    const dbPath = neuerStatePfad();
+    const env = { ...digestEnv, RECORD_DRY_RUN: 'true' };
+
+    const ersterLauf = lauf({ now: '2026-09-18T16:00:00Z', dbPath, env });
+    assert.match(ersterLauf, /Wochenübersicht fällig/);
+
+    // Zweiter Lauf 10 Minuten später – die Übersicht darf nicht erneut raus.
+    const zweiterLauf = lauf({ now: '2026-09-18T16:10:00Z', dbPath, env });
+    assert.doesNotMatch(zweiterLauf, /Termine der kommenden Woche/);
+  });
+
+  it('beachtet DIGEST_RANGE=next-week', () => {
+    const ausgabe = lauf({
+      now: '2026-09-18T16:00:00Z',
+      env: { ...digestEnv, DIGEST_RANGE: 'next-week' },
+    });
+    // Kalenderwoche ab Montag, 21.09. – die Vereinssitzung am 20.09. fällt raus.
+    assert.match(ausgabe, /Wochenübersicht 21\.09\. – 27\.09\.2026/);
+  });
+
+  it('überspringt eine leere Übersicht', () => {
+    const ausgabe = lauf({ now: '2026-11-20T17:00:00Z', env: digestEnv });
+    assert.match(ausgabe, /keine Termine.*übersprungen|Nichts zu senden/s);
+  });
+
+  it('verschickt sie leer, wenn DIGEST_SEND_WHEN_EMPTY=true', () => {
+    const ausgabe = lauf({
+      now: '2026-11-20T17:00:00Z',
+      env: { ...digestEnv, DIGEST_SEND_WHEN_EMPTY: 'true' },
+    });
+    assert.match(ausgabe, /Keine Termine/);
+  });
+});
+
+describe('Vorschau-Modus', () => {
+  it('zeigt geplante Erinnerungen, ohne zu senden', () => {
+    const ausgabe = lauf({ now: '2026-09-16T21:00:00Z', args: ['--preview', '30'] });
+
+    assert.match(ausgabe, /Vorschau: die nächsten 30 Tage/);
+    assert.match(ausgabe, /Elternabend/);
+    assert.match(ausgabe, /vorher →/);
+    assert.match(ausgabe, /geplant/);
+    assert.doesNotMatch(ausgabe, /DRY-RUN\] Nachricht/);
+  });
+
+  it('markiert eine gerade fällige Erinnerung', () => {
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--preview'] });
+    assert.match(ausgabe, />>> JETZT fällig/);
+  });
+
+  it('nennt den nächsten Versand der Wochenübersicht', () => {
+    const ausgabe = lauf({
+      now: '2026-09-16T21:00:00Z',
+      args: ['--preview'],
+      env: { DIGEST_ENABLED: 'true', DIGEST_DAY: 'fr', DIGEST_TIME: '18:00' },
+    });
+    assert.match(ausgabe, /Wochenübersicht: nächster Versand 2026-09-18 18:00/);
+  });
+
+  it('weist darauf hin, wenn kein Termin markiert ist', () => {
+    const ausgabe = lauf({
+      now: '2026-09-16T21:00:00Z',
+      args: ['--preview'],
+      env: { SELECT_CATEGORY: 'GibtEsNicht', SELECT_PREFIX: '[XX]' },
+    });
+    assert.match(ausgabe, /keiner ist markiert/);
+    assert.match(ausgabe, /nicht markiert: "Zahnarzt"/);
+  });
+});
+
+describe('Selektion abschaltbar', () => {
+  it('nimmt ohne Filter alle Termine, auch unmarkierte', () => {
+    const ausgabe = lauf({
+      now: '2026-09-20T07:15:00Z', // 1 Tag vor dem Zahnarzttermin
+      env: { SELECT_BY_CATEGORY: 'false', SELECT_BY_PREFIX: 'false' },
+    });
+
+    assert.match(ausgabe, /Selektion ist deaktiviert – ALLE Termine/);
+    assert.match(ausgabe, /Zahnarzt/);
+  });
+});
+
 describe('Fehlerbehandlung', () => {
   it('bricht bei fehlender ICS-Datei mit Exit-Code 1 ab', () => {
     assert.throws(
       () => lauf({ env: { ICS_PATH: '/gibt/es/nicht.ics' } }),
       (error) => {
-        assert.equal(error.status, 1);
-        assert.match(error.stderr, /ICS-Datei nicht gefunden/);
+        assert.match(error.message, /endete mit Code 1/);
+        assert.match(error.message, /ICS-Datei nicht gefunden/);
         return true;
       },
     );
@@ -128,7 +246,7 @@ describe('Fehlerbehandlung', () => {
     assert.throws(
       () =>
         execFileSync(process.execPath, [path.join(REPO_ROOT, 'src', 'index.js'), '--live'], {
-          cwd: REPO_ROOT,
+          cwd: SAUBERES_CWD,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
           env: { ...process.env, DB_PATH: neuerStatePfad(), WHATSAPP_GROUP_ID: '' },
@@ -145,7 +263,7 @@ describe('Fehlerbehandlung', () => {
     assert.throws(
       () =>
         execFileSync(process.execPath, [path.join(REPO_ROOT, 'src', 'index.js'), '--live'], {
-          cwd: REPO_ROOT,
+          cwd: SAUBERES_CWD,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
           env: { ...process.env, DB_PATH: neuerStatePfad(), WHATSAPP_GROUP_ID: '4915112345678@s.whatsapp.net' },

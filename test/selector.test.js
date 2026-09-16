@@ -32,6 +32,15 @@ describe('Terminselektion', () => {
     assert.equal(isSelected(event, config).reasons.length, 2);
   });
 
+  it('gilt für ALLE Termine, wenn beide Wege abgeschaltet sind', () => {
+    const ohneFilter = testConfig({ env: { SELECT_BY_CATEGORY: 'false', SELECT_BY_PREFIX: 'false' } });
+    const event = makeEvent({ titel: 'Zahnarzt', kategorien: ['Privat'] });
+    const ergebnis = isSelected(event, ohneFilter);
+
+    assert.equal(ergebnis.selected, true);
+    assert.deepEqual(ergebnis.reasons, ['Selektion deaktiviert']);
+  });
+
   it('respektiert abgeschaltete Selektionswege', () => {
     const nurKategorie = testConfig({ env: { SELECT_BY_PREFIX: 'false' } });
     assert.equal(isSelected(makeEvent({ titel: '[WA] Test' }), nurKategorie).selected, false);
@@ -62,6 +71,15 @@ describe('selectEvents', () => {
     const keep = testConfig({ env: { STRIP_PREFIX: 'false' } });
     const { selected } = selectEvents([makeEvent({ titel: '[WA] Elternabend' })], keep);
     assert.equal(selected[0].titel, '[WA] Elternabend');
+  });
+
+  it('nimmt ohne Filter jeden Termin mit', () => {
+    const ohneFilter = testConfig({ env: { SELECT_BY_CATEGORY: 'false', SELECT_BY_PREFIX: 'false' } });
+    const events = [makeEvent({ id: 'a' }), makeEvent({ id: 'b' }), makeEvent({ id: 'c' })];
+    const { selected, rejected } = selectEvents(events, ohneFilter);
+
+    assert.equal(selected.length, 3);
+    assert.equal(rejected.length, 0);
   });
 
   it('verändert das Original-Termin-Objekt nicht', () => {

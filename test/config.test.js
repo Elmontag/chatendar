@@ -73,11 +73,19 @@ describe('Validierung', () => {
     assert.throws(() => lade({ SOURCE: 'google' }), /SOURCE muss "file" oder "caldav" sein/);
   });
 
-  it('verlangt mindestens einen Selektionsweg', () => {
-    assert.throws(
-      () => lade({ SELECT_BY_CATEGORY: 'false', SELECT_BY_PREFIX: 'false' }),
-      /Mindestens eine Selektionsmethode/,
-    );
+  it('erlaubt das Abschalten beider Selektionswege (= kein Filter)', () => {
+    const config = lade({ SELECT_BY_CATEGORY: 'false', SELECT_BY_PREFIX: 'false' });
+    assert.equal(config.selectByCategory, false);
+    assert.equal(config.selectByPrefix, false);
+  });
+
+  it('prüft die Einstellungen der Wochenübersicht', () => {
+    assert.throws(() => lade({ DIGEST_ENABLED: 'true', DIGEST_DAY: 'Freitagabend' }), /DIGEST_DAY ist ungültig/);
+    assert.throws(() => lade({ DIGEST_ENABLED: 'true', DIGEST_TIME: '25:00' }), /DIGEST_TIME ist ungültig/);
+    assert.throws(() => lade({ DIGEST_ENABLED: 'true', DIGEST_RANGE: 'bald' }), /DIGEST_RANGE ist ungültig/);
+    assert.doesNotThrow(() => lade({ DIGEST_ENABLED: 'true', DIGEST_RANGE: 'next-week' }));
+    // Ungültige Werte stören nicht, solange die Übersicht aus ist.
+    assert.doesNotThrow(() => lade({ DIGEST_ENABLED: 'false', DIGEST_DAY: 'Unsinn' }));
   });
 
   it('lehnt ungültige Default-Vorlaufzeiten ab', () => {

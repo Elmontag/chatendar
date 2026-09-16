@@ -16,6 +16,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 
 import { parseDurationToMinutes } from './reminders/duration.js';
+import { parseTimeOfDay, parseWeekday } from './reminders/digest.js';
 
 /** Eingebaute Defaults. */
 const DEFAULTS = {
@@ -51,6 +52,18 @@ const DEFAULTS = {
   templateCollectionItem:
     '• *{titel}*\n  🗓 {datum}{?uhrzeit}, {uhrzeit} Uhr{/uhrzeit}{?ganztag} (ganztägig){/ganztag}{?ort}\n  📍 {ort}{/ort}',
   collectionSeparator: '\n\n',
+
+  // Wochenübersicht
+  digestEnabled: false,
+  digestDay: 'fr',
+  digestTime: '18:00',
+  digestRange: '7d',
+  digestSendWhenEmpty: false,
+  templateDigest: '🗓 *Termine der kommenden Woche* ({zeitraum})\n\n{items}',
+  templateDigestItem:
+    '• *{wochentag}, {datum_kurz}*{?uhrzeit} – {uhrzeit} Uhr{/uhrzeit}{?ganztag} – ganztägig{/ganztag}\n  {titel}{?ort} (📍 {ort}){/ort}',
+  templateDigestEmpty: '🗓 *Termine der kommenden Woche* ({zeitraum})\n\nKeine Termine.',
+  digestSeparator: '\n',
 
   // WhatsApp
   whatsappGroupId: '',
@@ -162,6 +175,16 @@ export function loadConfig({ configFile, overrides = {}, env = process.env, cwd 
       pick(env.COLLECTION_SEPARATOR, f.collectionSeparator) ?? DEFAULTS.collectionSeparator,
     ),
 
+    digestEnabled: toBool(pick(env.DIGEST_ENABLED, f.digestEnabled), DEFAULTS.digestEnabled),
+    digestDay: pick(env.DIGEST_DAY, f.digestDay, DEFAULTS.digestDay),
+    digestTime: pick(env.DIGEST_TIME, f.digestTime, DEFAULTS.digestTime),
+    digestRange: pick(env.DIGEST_RANGE, f.digestRange, DEFAULTS.digestRange),
+    digestSendWhenEmpty: toBool(pick(env.DIGEST_SEND_WHEN_EMPTY, f.digestSendWhenEmpty), DEFAULTS.digestSendWhenEmpty),
+    templateDigest: unescape(pick(env.TEMPLATE_DIGEST, f.templateDigest, DEFAULTS.templateDigest)),
+    templateDigestItem: unescape(pick(env.TEMPLATE_DIGEST_ITEM, f.templateDigestItem, DEFAULTS.templateDigestItem)),
+    templateDigestEmpty: unescape(pick(env.TEMPLATE_DIGEST_EMPTY, f.templateDigestEmpty, DEFAULTS.templateDigestEmpty)),
+    digestSeparator: unescape(pick(env.DIGEST_SEPARATOR, f.digestSeparator) ?? DEFAULTS.digestSeparator),
+
     whatsappGroupId: pick(env.WHATSAPP_GROUP_ID, f.whatsappGroupId, DEFAULTS.whatsappGroupId) ?? '',
     authDir: pick(env.AUTH_DIR, f.authDir, DEFAULTS.authDir),
     dryRun: toBool(pick(env.DRY_RUN, f.dryRun), DEFAULTS.dryRun),
@@ -197,9 +220,6 @@ export function validate(config) {
   if (config.source === 'file' && !config.icsPath) {
     errors.push('ICS_PATH muss gesetzt sein, wenn SOURCE=file');
   }
-  if (!config.selectByCategory && !config.selectByPrefix) {
-    errors.push('Mindestens eine Selektionsmethode muss aktiv sein (SELECT_BY_CATEGORY oder SELECT_BY_PREFIX)');
-  }
   if (config.selectByCategory && !config.selectCategory) {
     errors.push('SELECT_CATEGORY muss gesetzt sein, wenn SELECT_BY_CATEGORY=true');
   }
@@ -226,6 +246,28 @@ export function validate(config) {
     for (const part of parsed) parseDurationToMinutes(part);
   } catch (error) {
     errors.push(`DEFAULT_REMINDERS ist ungültig: ${error.message}`);
+  }
+
+  // Wochenübersicht: Tag, Uhrzeit und Zeitraum müssen parsebar sein.
+  if (config.digestEnabled) {
+    try {
+      parseWeekday(config.digestDay);
+    } catch (error) {
+      errors.push(`DIGEST_DAY ist ungültig: ${error.message}`);
+    }
+    try {
+      parseTimeOfDay(config.digestTime);
+    } catch (error) {
+      errors.push(`DIGEST_TIME ist ungültig: ${error.message}`);
+    }
+    const range = String(config.digestRange).trim().toLowerCase();
+    if (range !== 'next-week' && range !== 'kalenderwoche') {
+      try {
+        parseDurationToMinutes(range);
+      } catch (error) {
+        errors.push(`DIGEST_RANGE ist ungültig: ${error.message} (oder "next-week")`);
+      }
+    }
   }
 
   // Gruppen-ID nur im Echtbetrieb zwingend – Dry-Runs sollen ohne Kopplung laufen.

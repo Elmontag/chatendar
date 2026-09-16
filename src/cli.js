@@ -9,6 +9,8 @@ Aufruf:
   node src/index.js [Optionen]
 
 Optionen:
+  --preview [Tage]     Nur anzeigen, was ansteht und wann es verschickt wird
+                       (Default 14 Tage). Sendet nichts, ändert nichts.
   --dry-run            Nachrichten nur anzeigen, nichts senden (überschreibt DRY_RUN)
   --live               Tatsächlich senden (überschreibt DRY_RUN=true)
   --now <ISO-Zeit>     Referenzzeitpunkt für den Lauf (z. B. 2026-09-19T18:00:00Z) – zum Testen
@@ -27,7 +29,7 @@ Exit-Codes:
  * @returns {{overrides: object, now: Date|null, configFile: string|null, logLevel: string|null, help: boolean}}
  */
 export function parseArgs(argv) {
-  const result = { overrides: {}, now: null, configFile: null, logLevel: null, help: false };
+  const result = { overrides: {}, now: null, configFile: null, logLevel: null, help: false, preview: null };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -44,6 +46,21 @@ export function parseArgs(argv) {
     };
 
     switch (flag) {
+      case '--preview':
+      case '--vorschau': {
+        // Tagesangabe ist optional: --preview, --preview 30, --preview=30
+        let tage = inlineValue;
+        if (tage === null && /^\d+$/.test(argv[i + 1] ?? '')) {
+          tage = argv[i + 1];
+          i += 1;
+        }
+        const parsed = Number.parseInt(tage ?? '14', 10);
+        if (!Number.isFinite(parsed) || parsed < 1) {
+          throw new Error(`--preview erwartet eine Anzahl Tage (ist: "${tage}")`);
+        }
+        result.preview = parsed;
+        break;
+      }
       case '--dry-run':
         result.overrides.dryRun = true;
         break;

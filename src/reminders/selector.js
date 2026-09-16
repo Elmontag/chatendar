@@ -5,6 +5,10 @@
  * oder kombiniert aktivierbar (ODER-Verknüpfung – ein Treffer genügt):
  *   1. Kategorie/Tag im Kalendereintrag (SELECT_BY_CATEGORY / SELECT_CATEGORY)
  *   2. Präfix im Titel               (SELECT_BY_PREFIX  / SELECT_PREFIX)
+ *
+ * Sind BEIDE Wege abgeschaltet, ist die Selektion deaktiviert: dann gilt
+ * jeder Termin des Kalenders als markiert. Das ist für einen dedizierten
+ * Kalender sinnvoll, in dem ohnehin nur Termine für die Gruppe stehen.
  */
 
 /** Kategorie-Vergleich case-insensitiv und ohne Randleerzeichen. */
@@ -31,6 +35,11 @@ function stripPrefixFromTitle(title, prefix) {
  * @returns {{selected: boolean, reasons: string[]}}
  */
 export function isSelected(event, config) {
+  // Kein Filter aktiv -> alle Termine zählen als markiert.
+  if (!config.selectByCategory && !config.selectByPrefix) {
+    return { selected: true, reasons: ['Selektion deaktiviert'] };
+  }
+
   const reasons = [];
   if (config.selectByCategory && hasCategory(event, config.selectCategory)) {
     reasons.push(`Kategorie "${config.selectCategory}"`);

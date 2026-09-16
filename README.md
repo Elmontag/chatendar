@@ -13,13 +13,16 @@ Cronjob – siehe [Automatisierung](#automatisierung).
 - **Kalenderquelle austauschbar** – aktuell lokale ICS-Datei, die Schnittstelle
   für CalDAV/Nextcloud ist vorbereitet
 - **Gezielte Auswahl** – nur Termine, die per Kategorie (`WhatsApp`) und/oder
-  Titel-Präfix (`[WA]`) markiert sind
+  Titel-Präfix (`[WA]`) markiert sind; abschaltbar, dann zählen alle Termine
 - **Bis zu zwei Vorlaufzeiten pro Termin** – global konfigurierbar, pro Termin
   über `X-WA-REMIND` überschreibbar
 - **Kein Doppelversand** – jede Kombination aus Termin und Vorlaufzeit-Stufe
   wird dauerhaft in SQLite vermerkt
 - **Sammelnachrichten** – alles, was in einem Lauf zur selben Vorlaufzeit-Stufe
   fällig ist, landet in einer Nachricht
+- **Wochenübersicht** – zu einem festen Wochentermin (z. B. freitags 18:00)
+  eine Liste aller Termine der kommenden Woche
+- **Vorschau-Modus** – zeigt, was wann rausgeht, ohne zu senden
 - **Frei konfigurierbare Templates** – inklusive bedingter Abschnitte
 - **Dry-Run** – Nachrichten nur anzeigen, nichts senden (Default)
 - **Serientermine** – RRULE, EXDATE und verschobene Einzeltermine werden
@@ -83,6 +86,48 @@ Zeitpunkt: 2026-09-19 19:00 (Europe/Berlin) | Quelle: ICS-Datei | Modus: DRY-RUN
 `--now` setzt den Referenzzeitpunkt und ist nur zum Testen gedacht; im
 Normalbetrieb entfällt der Parameter.
 
+### 1a. Wenn nichts passiert: `--preview`
+
+Ein normaler Lauf sendet nur, was **genau jetzt** fällig ist. Das Prüffenster
+ist im Betrieb nur Minuten breit – ein einzelner Testlauf trifft also fast nie
+etwas, und die Ausgabe endet mit „Nichts zu senden“. Das ist der Normalfall,
+kein Fehler.
+
+Um zu sehen, ob die Konfiguration stimmt, gibt es den Vorschau-Modus. Er
+sendet nichts und verändert den State nicht:
+
+```bash
+node src/index.js --preview        # nächste 14 Tage
+node src/index.js --preview 60     # nächste 60 Tage
+```
+
+```
+── Vorschau: die nächsten 14 Tage ────────────────────
+Zeitpunkt: 2026-09-16 23:35 (Europe/Berlin) | Quelle: ICS-Datei | Datei/Ziel: /opt/chatendar/calendar.ics
+2 Termin(e) im Zeitraum geladen
+Selektion: Kategorie "WhatsApp" oder Präfix "[WA]"
+2 Termin(e) markiert, 0 nicht markiert
+
+    2026-09-18 19:00  Vereinssitzung  (Clubheim)
+        1d    vorher → 2026-09-17 19:00   geplant
+        2h    vorher → 2026-09-18 17:00   geplant
+
+    2026-09-21 17:00  Elternabend
+        1d    vorher → 2026-09-20 17:00   geplant
+        2h    vorher → 2026-09-21 15:00   geplant
+
+Wochenübersicht: nächster Versand 2026-09-18 18:00 (fr 18:00, Zeitraum 7d)
+```
+
+Daran lässt sich ablesen:
+
+| Beobachtung | Bedeutung |
+| ----------- | --------- |
+| `0 Termin(e) im Zeitraum geladen` | `ICS_PATH` zeigt auf die falsche Datei, oder alle Termine liegen in der Vergangenheit – mit `--preview 365` weiter nach vorn schauen |
+| `0 Termin(e) markiert` | Die Termine tragen weder Kategorie noch Präfix. Die Vorschau listet die gefundenen Termine samt ihrer Kategorien auf |
+| überall `geplant` | Alles korrekt – es ist schlicht noch nichts fällig |
+| `Prüffenster verpasst` | Das Tool lief zum Versandzeitpunkt nicht. `CHECK_WINDOW_MINUTES` erhöhen oder `CATCH_UP=true` setzen |
+
 ### 2. WhatsApp koppeln (QR-Code)
 
 ```bash
@@ -127,6 +172,17 @@ DRY_RUN=false
 Nur markierte Termine werden verschickt. Beide Wege sind einzeln oder
 gemeinsam nutzbar (`SELECT_BY_CATEGORY` / `SELECT_BY_PREFIX`); ein Treffer
 genügt.
+
+Wer einen **eigenen Kalender** nur für die Gruppe führt, braucht gar keine
+Markierung – dann beide Wege abschalten, und jeder Termin des Kalenders zählt:
+
+```ini
+SELECT_BY_CATEGORY=false
+SELECT_BY_PREFIX=false
+```
+
+In dem Fall warnt jeder Lauf deutlich, dass alle Termine verschickt werden –
+in einem gemischten Privatkalender wäre das unangenehm.
 
 **Über die Kategorie** (in den meisten Kalender-Apps als „Kategorie“ oder
 „Tag“ zu setzen):
@@ -207,6 +263,63 @@ Es gibt drei Templates: `TEMPLATE_SINGLE` für einen einzelnen fälligen Termin,
 für jeden Eintrag darin. WhatsApp kennt `*fett*`, `_kursiv_` und
 ` ```Monospace``` `.
 
+## Wochenübersicht
+
+Zusätzlich zu den Einzel-Erinnerungen kann zu einem festen Wochentermin eine
+Liste aller Termine der kommenden Woche verschickt werden:
+
+```ini
+DIGEST_ENABLED=true
+DIGEST_DAY=fr        # mo, di, mi, do, fr, sa, so (auch "Freitag" oder 0-6)
+DIGEST_TIME=18:00    # lokale Zeit in TIMEZONE
+DIGEST_RANGE=7d      # oder next-week
+```
+
+Ergebnis:
+
+```
+🗓 *Termine der kommenden Woche* (18.09. – 25.09.2026)
+
+• *Freitag, 18.09.2026* – 19:00 Uhr
+  Training (📍 Sporthalle)
+• *Samstag, 19.09.2026* – 21:00 Uhr
+  Chorprobe
+• *Sonntag, 20.09.2026* – 18:30 Uhr
+  Elternabend Klasse 4b (📍 Aula der Grundschule)
+```
+
+### Welcher Zeitraum?
+
+`DIGEST_RANGE` entscheidet, was „kommende Woche“ bedeutet:
+
+| Wert        | Bedeutung                                                              |
+| ----------- | ---------------------------------------------------------------------- |
+| `7d`        | rollierend: ab dem Versandzeitpunkt sieben Tage voraus (Default)        |
+| `14d`, `10d` … | beliebiger anderer rollierender Zeitraum                             |
+| `next-week` | die nächste volle Kalenderwoche, Montag 00:00 bis Sonntag 24:00         |
+
+Für einen Versand am **Freitag** passt meist `7d` – die Liste beginnt dann mit
+dem heutigen Abend. Für einen Versand am **Sonntag** ist oft `next-week`
+gemeint, damit die Liste sauber am Montag anfängt. Beides funktioniert an
+jedem Wochentag.
+
+### Verhalten
+
+- Die Übersicht geht **pro Woche genau einmal** raus. Der State-Schlüssel ist
+  der geplante Versandzeitpunkt, mehrere Läufe innerhalb des Prüffensters
+  erzeugen also keine Dubletten.
+- Es gelten dieselben Selektionsregeln wie bei den Erinnerungen – nur markierte
+  Termine landen in der Liste.
+- Fällt der Versandzeitpunkt in einen Lauf, in dem auch Erinnerungen fällig
+  sind, werden **zwei getrennte Nachrichten** verschickt.
+- Enthält der Zeitraum keine Termine, wird nichts gesendet. Mit
+  `DIGEST_SEND_WHEN_EMPTY=true` geht stattdessen `TEMPLATE_DIGEST_EMPTY` raus.
+- Auch hier gilt das Prüffenster: Das Tool muss um `DIGEST_TIME` herum laufen.
+  Bei `DIGEST_TIME=18:00` und einem 15-Minuten-Timer passt
+  `CHECK_WINDOW_MINUTES=30` problemlos.
+
+Der nächste Versandzeitpunkt lässt sich mit `--preview` prüfen.
+
 ## Automatisierung
 
 Das Tool bringt bewusst keinen eigenen Scheduler mit. Wichtig ist nur:
@@ -279,8 +392,9 @@ Cron startet mit minimalem Environment – deshalb das `cd`, damit `.env`,
 node src/index.js [Optionen]
 ```
 
-| Option           | Wirkung                                                     |
-| ---------------- | ----------------------------------------------------------- |
+| Option             | Wirkung                                                   |
+| ------------------ | --------------------------------------------------------- |
+| `--preview [Tage]` | Anzeigen, was ansteht und wann es rausgeht (Default 14)    |
 | `--dry-run`      | Nachrichten nur anzeigen, nichts senden                      |
 | `--live`         | Tatsächlich senden (überschreibt `DRY_RUN=true`)             |
 | `--now <ISO>`    | Referenzzeitpunkt setzen, z. B. `2026-09-19T17:00:00Z`       |
@@ -358,6 +472,7 @@ src/
     duration.js           Vorlaufzeiten parsen und formatieren
     scheduler.js          Versandzeitpunkte und Fälligkeit
     batching.js           Gruppierung je Vorlaufzeit-Stufe
+    digest.js             Wochenübersicht: Termin, Zeitraum, Fälligkeit
   messaging/
     templateRenderer.js   Templates füllen
     whatsappClient.js     Baileys-Wrapper
@@ -388,7 +503,8 @@ Am übrigen Code ändert sich nichts.
 
 ## Bekannte Grenzen
 
-- Eine Zielgruppe pro Installation (`WHATSAPP_GROUP_ID`)
+- Eine Zielgruppe pro Installation (`WHATSAPP_GROUP_ID`) – auch die
+  Wochenübersicht geht an dieselbe Gruppe
 - CalDAV noch nicht implementiert
 - Kein interner Scheduler – Aufruf erfolgt extern
 - Verschobene Serientermine werden nur erkannt, wenn die ursprüngliche
