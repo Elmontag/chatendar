@@ -10,14 +10,17 @@ Cronjob – siehe [Automatisierung](#automatisierung).
 
 ## Eigenschaften
 
-- **Kalenderquelle austauschbar** – aktuell lokale ICS-Datei, die Schnittstelle
-  für CalDAV/Nextcloud ist vorbereitet
+- **Mehrere Kalenderprofile** – jeder Kalender hat seinen eigenen vollständigen
+  Einstellungsstack
+- **Mehrere WhatsApp-Gruppen pro Profil** – dieselbe Profilnachricht kann an
+  mehrere Gruppen gehen
+- **Kalenderquelle austauschbar** – lokale ICS-Datei oder CalDAV/Nextcloud
 - **Gezielte Auswahl** – nur Termine, die per Kategorie (`WhatsApp`) und/oder
   Titel-Präfix (`[WA]`) markiert sind; abschaltbar, dann zählen alle Termine
 - **Bis zu zwei Vorlaufzeiten pro Termin** – global konfigurierbar, pro Termin
   über `X-WA-REMIND` überschreibbar
-- **Kein Doppelversand** – jede Kombination aus Termin und Vorlaufzeit-Stufe
-  wird dauerhaft in SQLite vermerkt
+- **Kein Doppelversand** – jede Kombination aus Profil, Zielgruppe, Termin und
+  Vorlaufzeit-Stufe wird dauerhaft in SQLite vermerkt
 - **Sammelnachrichten** – alles, was in einem Lauf zur selben Vorlaufzeit-Stufe
   fällig ist, landet in einer Nachricht
 - **Wochenübersicht** – zu einem festen Wochentermin (z. B. freitags 18:00)
@@ -46,6 +49,100 @@ $EDITOR .env
 
 Mindestens anzupassen sind `ICS_PATH` und – sobald wirklich gesendet werden
 soll – `WHATSAPP_GROUP_ID` sowie `DRY_RUN=false`.
+
+### Konfigurationsformen
+
+Die klassische Top-Level-Konfiguration bleibt vollständig kompatibel. Sie wird
+intern als ein implizites Profil mit der ID `default` behandelt:
+
+```ini
+SOURCE=file
+ICS_PATH=./calendar.ics
+WHATSAPP_GROUP_ID=120363000000000000@g.us
+DRY_RUN=true
+```
+
+Für mehrere Kalender werden stattdessen explizite `profiles[]` in
+`config.json` verwendet. Ein Profil ist eine vollständige, unabhängige
+Konfiguration: Kalenderquelle, Selektion, Vorlaufzeiten, Templates,
+Wochenübersicht, State-Datei und `whatsappGroups[]` gehören jeweils zum Profil.
+Profile mit `enabled: false` werden übersprungen.
+
+Alternativ kann die Konfiguration über eine lokale Web-Oberfläche gepflegt
+werden. Sie schreibt primär `config.json`; Werte aus `.env` haben weiterhin
+Vorrang und eignen sich für lokale Secrets:
+
+```bash
+npm run settings
+```
+
+Danach im Browser `http://127.0.0.1:3876` öffnen. Die Oberfläche bietet
+gruppierte Einstellungen, Template-Editoren mit Vorschau, Validierung sowie
+Preview- und Dry-Run-Aktionen. Kalenderprofile lassen sich dort anlegen,
+kopieren, aktivieren oder löschen und ihre WhatsApp-Gruppen hinzufügen,
+aktivieren oder entfernen. In der Profilverwaltung lassen sich die Gruppen der
+gekoppelten WhatsApp-Session über „WhatsApp-Gruppen laden“ auslesen und
+ausgewählte Einträge doppelungsfrei ins Profil übernehmen. Außerdem kann dort
+der gespeicherte Versand-State nur für das ausgewählte Profil geleert werden,
+z. B. nach Tests mit einer Testgruppe. Live-Versand wird dort nicht ausgelöst.
+
+### Mehrere Kalender und Gruppen
+
+Die bisherigen Top-Level-Einstellungen bleiben gültig und werden als ein
+implizites Standardprofil ausgeführt. Für mehrere Kalender wird in
+`config.json` stattdessen `profiles[]` verwendet. Jedes Profil enthält seinen
+eigenen vollständigen Einstellungsstack: Quelle, Selektion, Vorlaufzeiten,
+Templates, Wochenübersicht, State-Pfad und Zielgruppen.
+
+```json
+{
+  "profiles": [
+    {
+      "id": "schule",
+      "name": "Schulkalender",
+      "enabled": true,
+      "source": "caldav",
+      "caldav": {
+        "url": "https://cloud.example.test/remote.php/dav",
+        "username": "user@example.test",
+        "password": "app-passwort",
+        "calendar": "Schule"
+      },
+      "selectByCategory": true,
+      "selectCategory": "WhatsApp",
+      "defaultReminders": "1d",
+      "templateSingle": "Kurzer Reminder: *{titel}*\\n🗓 {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}",
+      "whatsappGroups": [
+        { "id": "120363000000000001@g.us", "name": "Eltern Klasse 3", "enabled": true },
+        { "id": "120363000000000002@g.us", "name": "Orga-Team", "enabled": true }
+      ],
+      "dbPath": "./data/schule.db"
+    },
+    {
+      "id": "verein",
+      "name": "Vereinskalender",
+      "enabled": true,
+      "source": "file",
+      "icsPath": "./verein.ics",
+      "selectByCategory": false,
+      "selectByPrefix": false,
+      "whatsappGroups": [
+        { "id": "120363000000000003@g.us", "name": "Verein", "enabled": true }
+      ],
+      "dbPath": "./data/verein.db"
+    }
+  ]
+}
+```
+
+Mehrere Gruppen in einem Profil erhalten denselben gerenderten Nachrichtentext.
+Gruppenspezifische Templates oder eigene Selektionsregeln pro Gruppe sind
+bewusst nicht Teil dieser Variante; dafür ein separates Profil anlegen.
+
+Die Gruppen-ID lässt sich nach `npm run pair` aus der Gruppenliste übernehmen.
+In der Settings-Oberfläche können Profile angelegt, kopiert, aktiviert oder
+gelöscht und die Gruppen je Profil verwaltet werden. Die Oberfläche speichert
+`config.json`; die eigentliche WhatsApp-Kopplung bleibt bei `npm run pair`.
 
 ### 1. Trockenlauf
 
@@ -144,7 +241,8 @@ Danach listet das Skript alle Gruppen mit ihrer ID auf:
 120363098765432109@g.us   Elternbeirat 4b
 ```
 
-Die passende ID nach `WHATSAPP_GROUP_ID` in die `.env` übernehmen.
+Die passende ID nach `WHATSAPP_GROUP_ID` in die `.env` übernehmen oder in
+`config.json` unter `whatsappGroups[]` des jeweiligen Profils hinterlegen.
 
 > **Wichtig:** Die Session liegt in `./auth_session` und erlaubt vollen Zugriff
 > auf den gekoppelten WhatsApp-Account. Der Ordner ist in `.gitignore`
@@ -234,34 +332,50 @@ mit Ausnahme und einen nicht markierten Termin.
 
 ## Nachrichten anpassen
 
-Templates sind reine Konfiguration (`.env` oder `config.json`). Platzhalter:
+Templates sind reine Konfiguration (`config.json`, `.env` oder die lokale
+Settings-Oberfläche). Platzhalter:
 
-| Platzhalter      | Inhalt                                          |
-| ---------------- | ----------------------------------------------- |
-| `{titel}`        | Titel des Termins (ggf. ohne Präfix)            |
-| `{datum}`        | `So., 20.09.2026`                               |
-| `{datum_kurz}`   | `20.09.2026`                                    |
-| `{wochentag}`    | `Sonntag`                                       |
-| `{uhrzeit}`      | `18:30` – leer bei ganztägigen Terminen         |
-| `{ort}`          | Ort des Termins                                 |
-| `{ganztag}`      | `ganztägig` bei ganztägigen Terminen            |
-| `{vorlauf}`      | `1 Tag`, `2 Stunden`                            |
-| `{vorlauf_kurz}` | `1d`, `2h`                                      |
-| `{items}`        | nur im Sammel-Template: die gerenderte Liste    |
-| `{anzahl}`       | nur im Sammel-Template: Anzahl der Termine      |
+| Platzhalter | Inhalt |
+| ----------- | ------ |
+| `{titel}` | Titel des Termins (ggf. ohne Präfix) |
+| `{tag_relativ}` / `{tag_relativ_ende}` | `Heute`, `Morgen`, `Übermorgen`, `In 4 Tagen` |
+| `{tagesbereich_relativ}` | `Morgen` oder bei mehrtägigen Terminen `Morgen bis Übermorgen` |
+| `{datum}` | rückwärtskompatibel: `So., 20.09.2026` |
+| `{datum_ohne_wochentag}` / `{datum_kurz}` | nur Datum: `20.09.2026` |
+| `{datum_mit_wochentag}` | ausgeschrieben: `Sonntag, 20.09.2026` |
+| `{datum_mit_wochentag_kurz}` | abgekürzt: `So., 20.09.2026` |
+| `{datum_ende_ohne_wochentag}`, `{datum_ende_mit_wochentag}`, `{datum_ende_mit_wochentag_kurz}` | Enddatum-Varianten für mehrtägige Termine |
+| `{datum_relativ}` / `{datum_relativ_ende}` | relativer Tag plus Datum |
+| `{datumsbereich}` | nur Datum/Zeitraum ohne Wochentag und Uhrzeit: `20.09.2026` oder `20.09.2026–22.09.2026` |
+| `{datumsbereich_mit_wochentag}` | Zeitraum mit ausgeschriebenen Wochentagen |
+| `{datumsbereich_mit_wochentag_kurz}` | Zeitraum mit abgekürzten Wochentagen |
+| `{termin_zeit}` | nur Uhrzeit/Zeitspanne: `18:30–20:00 Uhr`, leer bei ganztägigen Terminen |
+| `{termin_zeitraum}` | kompletter rückwärtskompatibler Terminzeitraum inkl. relativer Tagesangabe und Uhrzeit |
+| `{wochentag}` / `{wochentag_kurz}` | `Sonntag` / `So.` |
+| `{wochentag_ende}` / `{wochentag_ende_kurz}` | End-Wochentag für mehrtägige Termine |
+| `{uhrzeit}` / `{uhrzeit_ende}` | Start-/Enduhrzeit ohne `Uhr`, leer bei ganztägigen Terminen |
+| `{ort}` | Ort des Termins |
+| `{vorlauf}` / `{vorlauf_kurz}` | `1 Tag` / `1d` |
+| `{items}` | nur in Sammel-/Übersichts-Templates: gerenderte Liste |
+| `{anzahl}` | nur in Sammel-/Übersichts-Templates: Anzahl der Termine |
 
 Bedingte Abschnitte `{?platzhalter}…{/platzhalter}` erscheinen nur, wenn der
 Platzhalter gefüllt ist. So entfällt die Ortszeile automatisch bei Terminen
 ohne Ort:
 
 ```
-TEMPLATE_SINGLE=🔔 *{titel}*\n🗓 {datum}{?uhrzeit} um {uhrzeit} Uhr{/uhrzeit}{?ort}\n📍 {ort}{/ort}
+TEMPLATE_SINGLE=Kurzer Reminder ({vorlauf} vorher): *{titel}*\n🗓 {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}{?ort}\n📍 {ort}{/ort}
 ```
 
 Es gibt drei Templates: `TEMPLATE_SINGLE` für einen einzelnen fälligen Termin,
 `TEMPLATE_COLLECTION` für die Sammelnachricht und `TEMPLATE_COLLECTION_ITEM`
 für jeden Eintrag darin. WhatsApp kennt `*fett*`, `_kursiv_` und
 ` ```Monospace``` `.
+
+In `config.json` können Templates als normale mehrzeilige JSON-Strings stehen.
+In `.env` werden `\n`-Sequenzen zu echten Zeilenumbrüchen umgewandelt. Die
+Settings-Oberfläche zeigt für die Reminder- und Wochenübersichts-Templates eine
+Vorschau mit Beispieldaten.
 
 ## Wochenübersicht
 
@@ -406,6 +520,29 @@ node src/index.js [Optionen]
 Exit-Code `0` bei Erfolg, `1` bei Fehlern (Konfiguration, Kalender, Versand) –
 für Monitoring auswertbar.
 
+### Einstellungen im Browser
+
+```bash
+npm run settings
+```
+
+Startet eine lokale Oberfläche auf `127.0.0.1:3876`. Dort lassen sich die
+üblichen Konfigurationswerte in `config.json` speichern, Profile kopieren oder
+löschen, WhatsApp-Gruppen pro Profil verwalten, Templates mit Textareas
+bearbeiten, die Konfiguration validieren und `--preview` bzw. `--dry-run`
+sicher ohne Live-Versand ausführen. Diese Aktionen nutzen das aktuell in der
+Sidebar ausgewählte Profil inklusive ungespeicherter Änderungen, also auch
+profilspezifischer Kalenderquellen und Nachrichtentemplates. In der
+Profilverwaltung liest „WhatsApp-Gruppen laden“ die Gruppen der gekoppelten
+Session des ausgewählten Profils (Ordner aus `AUTH_DIR`) und übernimmt
+ausgewählte Gruppen per „Ausgewählte übernehmen“ ohne Doppelungen in die
+Gruppenliste; dabei werden keine Nachrichten gesendet. Fehlt die Session oder
+wird ein neuer QR-Code verlangt, meldet die Oberfläche das mit dem Hinweis auf
+`npm run pair`. Das eigentliche Koppeln erfolgt weiterhin per `npm run pair`.
+Mit „State dieses Profils leeren“ lassen sich nur die Versandmarker des aktuell
+ausgewählten Profils entfernen; Einstellungen, Kalenderdaten und andere Profile
+bleiben unverändert.
+
 ## Wie die Fälligkeit bestimmt wird
 
 Der Versandzeitpunkt ist `Termin-Start − Vorlaufzeit`. Eine Erinnerung ist
@@ -430,15 +567,29 @@ solange der Termin noch bevorsteht.
 
 ## State und Duplikatsvermeidung
 
-Jede Kombination aus Termin-ID und Vorlaufzeit-Stufe wird in der SQLite-Tabelle
-`sent_reminders` (`DB_PATH`) festgehalten. Bei Serienterminen enthält die ID den
-Zeitpunkt der Instanz, damit jeder Termin einzeln gezählt wird.
+Jede Kombination aus Profil-ID, Zielgruppen-ID, Termin-ID und Vorlaufzeit-Stufe
+wird in der SQLite-Tabelle `sent_reminders` (`DB_PATH`) festgehalten. Bei
+Serienterminen enthält die ID den Zeitpunkt der Instanz, damit jeder Termin
+einzeln gezählt wird.
+
+Beim ersten Start mit einer älteren State-Datenbank wird die Tabelle automatisch
+auf das neue Schema migriert. Alte Einträge werden dem Profil `default` und der
+Zielgruppe `default` zugeordnet. Dadurch bleibt die historische
+Top-Level-Konfiguration nachvollziehbar; neue Profil-/Gruppen-Kombinationen
+haben jeweils ihren eigenen State und unterdrücken einander nicht. Profil-IDs
+und Gruppen-IDs sollten deshalb stabil bleiben.
 
 Persistiert wird erst **nach** erfolgreichem Versand. Schlägt das Senden fehl,
 bleibt die Erinnerung offen und wird beim nächsten Lauf erneut versucht.
 
 Dry-Runs verändern den State standardmäßig nicht (`RECORD_DRY_RUN=false`), sind
 also beliebig wiederholbar.
+
+In der Settings-Oberfläche kann der State gezielt pro Profil geleert werden.
+Das ist praktisch, wenn ein Profil zunächst gegen eine Testgruppe lief und
+anschließend in den Produktivbetrieb wechseln soll. Gelöscht werden nur Einträge
+mit der jeweiligen Profil-ID; andere Profile in derselben SQLite-Datei bleiben
+erhalten.
 
 ```bash
 # Was wurde bereits verschickt?
@@ -466,7 +617,7 @@ src/
   calendar/
     calendarSource.js     Interface + Registry der Quellen
     icsSource.js          ICS-Datei (node-ical), inkl. Serienauflösung
-    caldavSource.js       Stub für CalDAV/Nextcloud
+    caldavSource.js       CalDAV/Nextcloud via tsdav
   reminders/
     selector.js           Terminselektion (Kategorie/Präfix)
     duration.js           Vorlaufzeiten parsen und formatieren
@@ -489,23 +640,27 @@ auth_session/             Baileys-Session (gitignored)
 data/                     SQLite-State (gitignored)
 ```
 
-## CalDAV nachrüsten
+## CalDAV / Nextcloud verwenden
 
-Die Abstraktion steht, `SOURCE=caldav` ist bereits registriert. Zu tun ist nur:
+Statt einer lokalen ICS-Datei kann direkt ein CalDAV-Kalender gelesen werden:
 
-1. `npm install tsdav`
-2. `fetchEvents()` in `src/calendar/caldavSource.js` implementieren – die Datei
-   enthält eine ausformulierte Umsetzungsskizze
-3. Zurückgeben müssen die Termine die interne Struktur aus
-   `src/calendar/calendarSource.js`
+```ini
+SOURCE=caldav
+CALDAV_URL=https://cloud.example.com/remote.php/dav
+CALDAV_USERNAME=...
+CALDAV_PASSWORD=...
+CALDAV_CALENDAR=Familienkalender
+```
 
-Am übrigen Code ändert sich nichts.
+`CALDAV_CALENDAR` kann der Anzeigename des Kalenders oder dessen URL sein. Die
+abgerufenen iCalendar-Objekte werden durch dieselbe ICS-Logik verarbeitet wie
+lokale Dateien, inklusive Kategorien, `X-WA-REMIND`, Ganztags- und
+Serienterminen.
 
 ## Bekannte Grenzen
 
-- Eine Zielgruppe pro Installation (`WHATSAPP_GROUP_ID`) – auch die
-  Wochenübersicht geht an dieselbe Gruppe
-- CalDAV noch nicht implementiert
+- Alle aktivierten Gruppen eines Profils erhalten dieselbe gerenderte
+  Nachricht; gruppenspezifische Templates gibt es nicht
 - Kein interner Scheduler – Aufruf erfolgt extern
 - Verschobene Serientermine werden nur erkannt, wenn die ursprüngliche
   Instanz im Abfragefenster liegt
