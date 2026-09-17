@@ -27,6 +27,7 @@ import { groupReminders } from './reminders/batching.js';
 import { evaluateDigest, eventsInRange, nextScheduledInstant } from './reminders/digest.js';
 import { buildDigestMessage, buildGroupMessage, formatRangeLabel } from './messaging/templateRenderer.js';
 import { createWhatsAppClient } from './messaging/whatsappClient.js';
+import { targetAddress, targetKindLabel } from './messaging/whatsappTarget.js';
 import { openDatabase, SENT_STATUS } from './state/db.js';
 import { formatForLog } from './util/datetime.js';
 import { log, setLevel } from './logger.js';
@@ -78,11 +79,11 @@ async function ladeUndSelektiere(config, now, horizontTage) {
  */
 async function runPreview(config, now, tage, db, target) {
   const source = getCalendarSource(config);
-  const previewTarget = target ?? { id: 'default', name: '(keine Gruppen-ID gesetzt)' };
-  const previewScope = { profileId: config.profileId ?? 'default', targetId: previewTarget.id };
+  const previewTarget = target ?? { id: 'default', jid: 'default', name: '(kein WhatsApp-Ziel gesetzt)' };
+  const previewScope = { profileId: config.profileId ?? 'default', targetId: previewTarget.jid ?? previewTarget.id };
   log.section(
     `Vorschau: die nächsten ${tage} Tage` +
-      (config.profileId ? ` – Zielgruppe "${previewTarget.name || previewTarget.id}"` : ''),
+      (config.profileId ? ` – WhatsApp-Ziel "${previewTarget.name || targetAddress(previewTarget)}"` : ''),
   );
   log.info(
     `Zeitpunkt: ${formatForLog(now, config.timezone)} (${config.timezone}) | ` +
@@ -113,26 +114,30 @@ async function runPreview(config, now, tage, db, target) {
     }
   }
 
-  // Geplante Erinnerungen je Termin auflisten.
-  for (const event of selected) {
-    console.log(
-      `\n    ${formatForLog(event.start, config.timezone)}  ${event.titel}` +
-        (event.ort ? `  (${event.ort})` : ''),
-    );
-    for (const reminder of buildReminders(event, config)) {
-      const bereitsVersendet = db.isSent(reminder.eventId, reminder.offsetMinutes, previewScope);
-      const status = bereitsVersendet
-        ? 'bereits versendet'
-        : reminder.sendAt > now
-          ? 'geplant'
-          : reminder.sendAt >= new Date(now.getTime() - config.checkWindowMinutes * 60000)
-            ? '>>> JETZT fällig'
-            : 'Prüffenster verpasst';
+  if (config.remindersEnabled) {
+    // Geplante Erinnerungen je Termin auflisten.
+    for (const event of selected) {
       console.log(
-        `        ${reminder.offsetKey.padEnd(5)} vorher → ` +
-          `${formatForLog(reminder.sendAt, config.timezone)}   ${status}`,
+        `\n    ${formatForLog(event.start, config.timezone)}  ${event.titel}` +
+          (event.ort ? `  (${event.ort})` : ''),
       );
+      for (const reminder of buildReminders(event, config)) {
+        const bereitsVersendet = db.isSent(reminder.eventId, reminder.offsetMinutes, previewScope);
+        const status = bereitsVersendet
+          ? 'bereits versendet'
+          : reminder.sendAt > now
+            ? 'geplant'
+            : reminder.sendAt >= new Date(now.getTime() - config.checkWindowMinutes * 60000)
+              ? '>>> JETZT fällig'
+              : 'Prüffenster verpasst';
+        console.log(
+          `        ${reminder.offsetKey.padEnd(5)} vorher → ` +
+            `${formatForLog(reminder.sendAt, config.timezone)}   ${status}`,
+        );
+      }
     }
+  } else {
+    log.info('Einzel- und Sammelerinnerungen: deaktiviert (REMINDERS_ENABLED=false)');
   }
 
   // Wochenübersicht.
@@ -158,22 +163,24 @@ async function runPreview(config, now, tage, db, target) {
 }
 
 function enabledTargets(profile) {
-  const groups = (profile.whatsappGroups ?? []).filter((group) => group.enabled);
-  if (groups.length > 0) return groups;
-  return profile.dryRun ? [{ id: 'default', name: '(keine Gruppen-ID gesetzt)', enabled: true }] : [];
+  const targets = (profile.whatsappTargets ?? []).filter((target) => target.enabled);
+  if (targets.length > 0) return targets;
+  return profile.dryRun
+    ? [{ type: 'group', id: 'default', jid: 'default', name: '(kein WhatsApp-Ziel gesetzt)', enabled: true }]
+    : [];
 }
 
 async function runProfilePreview(profile, now, tage) {
   const db = openDatabase(profile.dbPath);
   try {
-    const groups = enabledTargets(profile);
+    const targets = enabledTargets(profile);
     log.section(`Profil "${profile.profileName}" – Vorschau`);
     log.info(
-      `Profil-ID: ${profile.profileId} | Zielgruppen: ` +
-        (groups.length > 0 ? groups.map((group) => group.name || group.id).join(', ') : '(keine)'),
+      `Profil-ID: ${profile.profileId} | WhatsApp-Ziele: ` +
+        (targets.length > 0 ? targets.map((target) => target.name || targetAddress(target)).join(', ') : '(keine)'),
     );
-    for (const group of groups) {
-      await runPreview(profile, now, tage, db, group);
+    for (const target of targets) {
+      await runPreview(profile, now, tage, db, target);
     }
     return 0;
   } finally {
@@ -181,8 +188,12 @@ async function runProfilePreview(profile, now, tage) {
   }
 }
 
-function scopedEntries(entries, profile, group) {
-  return entries.map((entry) => ({ ...entry, profileId: profile.profileId, targetId: group.id }));
+function scopedEntries(entries, profile, target) {
+  return entries.map((entry) => ({
+    ...entry,
+    profileId: profile.profileId,
+    targetId: target.jid ?? target.id,
+  }));
 }
 
 async function runProfile(profile, now) {
@@ -222,47 +233,51 @@ async function runProfile(profile, now) {
     const targets = enabledTargets(profile);
     if (!profile.dryRun) client = await createWhatsAppClient(profile);
 
-    for (const group of targets) {
+    for (const target of targets) {
       try {
-        const targetScope = { profileId: profile.profileId, targetId: group.id };
-        log.section(`Zielgruppe "${group.name || group.id}"`);
-        const { due, skipped } = evaluateReminders(selected, profile, {
-          now,
-          isSent: (eventId, offsetMinutes) => db.isSent(eventId, offsetMinutes, targetScope),
-        });
-        log.info(
-          `${due.length} Erinnerung(en) fällig, ${skipped.length} übersprungen` +
-            (skipped.length > 0 ? ` (${summarizeSkips(skipped)})` : ''),
-        );
-        for (const entry of skipped) {
-          log.debug(
-            `  übersprungen [${entry.reason}]: "${entry.event.titel}" – ${entry.offsetKey} vorher, ` +
-              `Versand wäre ${formatForLog(entry.sendAt, profile.timezone)}`,
-          );
-        }
-
-        const missed = skipped.filter((entry) => entry.reason === SKIP_REASONS.WINDOW_MISSED);
-        if (missed.length > 0) {
-          if (!profile.dryRun) db.markManyProcessed(scopedEntries(missed, profile, group), SENT_STATUS.MISSED, now);
-          log.warn(
-            `${missed.length} Erinnerung(en) lagen vor dem Prüffenster (${profile.checkWindowMinutes} min) ` +
-              (profile.dryRun
-                ? 'und würden im Live-Modus nicht nachgeholt. Dry-Run: State bleibt unverändert. '
-                : 'und werden nicht nachgeholt. ') +
-              'Mit CATCH_UP=true würden sie nachgeholt.',
-          );
-        }
-
+        const targetScope = { profileId: profile.profileId, targetId: target.jid };
+        log.section(`WhatsApp-${targetKindLabel(target)} "${target.name || targetAddress(target)}"`);
         const messages = [];
-        for (const reminderGroup of groupReminders(due)) {
-          messages.push({
-            label: `${reminderGroup.reminders.length} Termin(e), ${reminderGroup.offsetKey} vorher`,
-            text: buildGroupMessage(reminderGroup, profile, now),
-            stateEntries: scopedEntries(reminderGroup.reminders, profile, group),
+        if (profile.remindersEnabled) {
+          const { due, skipped } = evaluateReminders(selected, profile, {
+            now,
+            isSent: (eventId, offsetMinutes) => db.isSent(eventId, offsetMinutes, targetScope),
           });
-        }
-        if (messages.length > 0) {
-          log.info(`${messages.length} Sammelnachricht(en) aus ${due.length} Erinnerung(en) gebaut`);
+          log.info(
+            `${due.length} Erinnerung(en) fällig, ${skipped.length} übersprungen` +
+              (skipped.length > 0 ? ` (${summarizeSkips(skipped)})` : ''),
+          );
+          for (const entry of skipped) {
+            log.debug(
+              `  übersprungen [${entry.reason}]: "${entry.event.titel}" – ${entry.offsetKey} vorher, ` +
+                `Versand wäre ${formatForLog(entry.sendAt, profile.timezone)}`,
+            );
+          }
+
+          const missed = skipped.filter((entry) => entry.reason === SKIP_REASONS.WINDOW_MISSED);
+          if (missed.length > 0) {
+            if (!profile.dryRun) db.markManyProcessed(scopedEntries(missed, profile, target), SENT_STATUS.MISSED, now);
+            log.warn(
+              `${missed.length} Erinnerung(en) lagen vor dem Prüffenster (${profile.checkWindowMinutes} min) ` +
+                (profile.dryRun
+                  ? 'und würden im Live-Modus nicht nachgeholt. Dry-Run: State bleibt unverändert. '
+                  : 'und werden nicht nachgeholt. ') +
+                'Mit CATCH_UP=true würden sie nachgeholt.',
+            );
+          }
+
+          for (const reminderGroup of groupReminders(due)) {
+            messages.push({
+              label: `${reminderGroup.reminders.length} Termin(e), ${reminderGroup.offsetKey} vorher`,
+              text: buildGroupMessage(reminderGroup, profile, now),
+              stateEntries: scopedEntries(reminderGroup.reminders, profile, target),
+            });
+          }
+          if (messages.length > 0) {
+            log.info(`${messages.length} Sammelnachricht(en) aus ${due.length} Erinnerung(en) gebaut`);
+          }
+        } else {
+          log.debug('Einzel- und Sammelerinnerungen deaktiviert (REMINDERS_ENABLED=false)');
         }
 
         if (profile.digestEnabled) {
@@ -280,7 +295,7 @@ async function runProfile(profile, now) {
                   event: { titel: `Wochenübersicht ${zeitraum}`, start: digest.scheduledAt },
                   sendAt: digest.scheduledAt,
                 },
-              ], profile, group),
+              ], profile, target),
             });
             log.info(`Wochenübersicht fällig (${zeitraum}) mit ${enthalten.length} Termin(en)`);
           } else if (digest.due) {
@@ -304,8 +319,8 @@ async function runProfile(profile, now) {
         for (const { label, text, stateEntries } of messages) {
           if (profile.dryRun) {
             log.info(
-              `[DRY-RUN] Nachricht an ${group.name || '(unbenannte Gruppe)'} ` +
-                `(${group.id || 'keine Gruppen-ID gesetzt'}) – ${label}:`,
+              `[DRY-RUN] Nachricht an ${target.name || `(unbenannte ${targetKindLabel(target)})`} ` +
+                `(${targetAddress(target) || 'kein Ziel gesetzt'}) – ${label}:`,
             );
             console.log(indent(text));
             if (profile.recordDryRun) db.markManyProcessed(stateEntries, SENT_STATUS.DRY_RUN, now);
@@ -313,19 +328,22 @@ async function runProfile(profile, now) {
           }
 
           try {
-            const messageId = await client.sendText(group.id, text);
+            const messageId = await client.sendText(target, text);
             db.markManyProcessed(stateEntries, SENT_STATUS.SENT, now);
-            log.info(`Gesendet an ${group.name || group.id} (${label}), Message-ID: ${messageId ?? 'unbekannt'}`);
+            log.info(
+              `Gesendet an ${target.name || targetAddress(target)} (${label}), ` +
+                `Message-ID: ${messageId ?? 'unbekannt'}`,
+            );
           } catch (error) {
             exitCode = 1;
-            log.error(`Versand fehlgeschlagen an ${group.name || group.id} (${label}): ${error.message}`);
+            log.error(`Versand fehlgeschlagen an ${target.name || targetAddress(target)} (${label}): ${error.message}`);
             log.error('Diese Nachricht wird beim nächsten Lauf erneut versucht (kein State-Eintrag geschrieben).');
           }
         }
       } catch (error) {
         exitCode = 1;
         log.error(
-          `Zielgruppe ${group.name || group.id} in Profil "${profile.profileName}" fehlgeschlagen: ${error.message}`,
+          `WhatsApp-Ziel ${target.name || targetAddress(target)} in Profil "${profile.profileName}" fehlgeschlagen: ${error.message}`,
         );
       }
     }

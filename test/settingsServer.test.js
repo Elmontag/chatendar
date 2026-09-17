@@ -139,6 +139,7 @@ describe('Settings server', () => {
     assert.match(html, /Nachrichten-Vorschau/);
     assert.match(html, /Vorschau Wochenübersicht/);
     assert.match(html, /parameterDialog/);
+    assert.match(html, /Person hinzufügen/);
     assert.match(html, /Parameterübersicht/);
     assert.match(html, /id="profileDialog"/);
     assert.match(html, /id="manageProfiles"/);
@@ -231,7 +232,7 @@ describe('Settings server', () => {
     assert.equal(payload.values.selectByCategory, false);
   });
 
-  it('speichert Profile mit mehreren WhatsApp-Gruppen', async () => {
+  it('speichert Profile mit gemischten WhatsApp-Zielen', async () => {
     const { response, payload } = await request('/api/config', {
       profiles: [
         {
@@ -243,9 +244,9 @@ describe('Settings server', () => {
             icsPath: path.join(FIXTURES, 'beispiel.ics'),
             defaultReminders: '1d',
           },
-          whatsappGroups: [
-            { id: '120363000000000001@g.us', name: 'Klasse 3', enabled: true },
-            { id: '120363000000000002@g.us', name: 'Orga', enabled: true },
+          whatsappTargets: [
+            { type: 'group', id: '120363000000000001@g.us', name: 'Klasse 3', enabled: true },
+            { type: 'person', phone: '+4915112345678', name: 'Ada', enabled: true },
           ],
         },
       ],
@@ -254,7 +255,8 @@ describe('Settings server', () => {
     assert.equal(response.status, 200);
     assert.equal(payload.ok, true);
     assert.equal(payload.profiles[0].id, 'schule');
-    assert.equal(payload.profiles[0].whatsappGroups.length, 2);
+    assert.equal(payload.profiles[0].whatsappTargets.length, 2);
+    assert.equal(payload.profiles[0].whatsappTargets[1].phone, '+4915112345678');
   });
 
   it('speichert ein neues Dry-Run-Profil mit generierter ID und leerem Gruppenplatzhalter', async () => {
@@ -275,7 +277,7 @@ describe('Settings server', () => {
     assert.equal(payload.ok, true);
     assert.equal(payload.profiles[0].id, 'schule-ferien');
     assert.equal(payload.profiles[0].name, 'Schule & Ferien');
-    assert.deepEqual(payload.profiles[0].whatsappGroups, []);
+    assert.deepEqual(payload.profiles[0].whatsappTargets, []);
   });
 
   it('lehnt unvollständige Profile mit einem Fehlerstatus ab', async () => {
@@ -291,7 +293,7 @@ describe('Settings server', () => {
     assert.equal(response.status, 400);
     assert.equal(payload.ok, false);
     assert.match(payload.error, /braucht einen Namen/);
-    assert.match(payload.error, /braucht eine ID/);
+    assert.match(payload.error, /braucht eine Gruppen-ID/);
   });
 
   it('maskiert sensible Profilwerte beim Speichern und erneuten Laden', async () => {

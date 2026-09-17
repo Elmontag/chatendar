@@ -141,7 +141,7 @@ describe('Settings config store', () => {
     assert.equal(config.profiles[0].caldav.password, 'secret');
   });
 
-  it('lehnt unvollständige Profile und Gruppen vor dem Speichern ab', () => {
+  it('lehnt unvollständige Profile und Ziele vor dem Speichern ab', () => {
     const result = validateProfiles([{
       id: 'schule',
       name: '',
@@ -151,7 +151,7 @@ describe('Settings config store', () => {
 
     assert.equal(result.ok, false);
     assert.match(result.error, /Profil 1 braucht einen Namen/);
-    assert.match(result.error, /WhatsApp-Gruppe 1 in Profil 1 braucht eine ID/);
+    assert.match(result.error, /WhatsApp-Ziel 1 in Profil 1 braucht eine Gruppen-ID/);
   });
 
   it('erzeugt sichere Profil-IDs und ignoriert leere Gruppenplatzhalter im Dry-Run', () => {
@@ -169,7 +169,7 @@ describe('Settings config store', () => {
 
     assert.equal(result.ok, true);
     assert.equal(result.config.profiles[0].id, 'schule-ferien');
-    assert.deepEqual(result.config.profiles[0].whatsappGroups, []);
+    assert.deepEqual(result.config.profiles[0].whatsappTargets, []);
     assert.equal(profileIdFromName('Straße / Café'), 'strasse-cafe');
   });
 
@@ -192,7 +192,7 @@ describe('Settings config store', () => {
     assert.match(duplicate.error, /ist doppelt/);
   });
 
-  it('behält leere Gruppenplatzhalter nicht in der gespeicherten Konfiguration', () => {
+  it('behält leere Zielplatzhalter nicht in der gespeicherten Konfiguration', () => {
     const config = buildProfilesConfigJson([{
       name: 'Privat',
       values: {},
@@ -200,10 +200,10 @@ describe('Settings config store', () => {
     }]);
 
     assert.equal(config.profiles[0].id, 'privat');
-    assert.deepEqual(config.profiles[0].whatsappGroups, []);
+    assert.deepEqual(config.profiles[0].whatsappTargets, []);
   });
 
-  it('speichert whatsappGroups[] ohne redundantes whatsappGroupId in der Profil-JSON', () => {
+  it('migriert whatsappGroups[] beim Speichern in whatsappTargets[]', () => {
     const config = buildProfilesConfigJson([{
       id: 'schule',
       name: 'Schule',
@@ -212,15 +212,24 @@ describe('Settings config store', () => {
     }]);
 
     assert.ok(!('whatsappGroupId' in config.profiles[0]));
-    assert.equal(config.profiles[0].whatsappGroups[0].id, '120363000000000001@g.us');
+    assert.ok(!('whatsappGroups' in config.profiles[0]));
+    assert.deepEqual(config.profiles[0].whatsappTargets[0], {
+      type: 'group',
+      id: '120363000000000001@g.us',
+      name: 'Klasse 3',
+      enabled: true,
+    });
   });
 
-  it('entfernt stale whatsappGroupId aus vorhandenen Profil-Dateien beim erneuten Speichern', () => {
+  it('speichert gemischte Ziele und entfernt alte Gruppenfelder', () => {
     const config = buildProfilesConfigJson([{
       id: 'schule',
       name: 'Schule',
       values: {},
-      whatsappGroups: [{ id: '120363000000000002@g.us', name: 'Orga', enabled: true }],
+      whatsappTargets: [
+        { type: 'group', id: '120363000000000002@g.us', name: 'Orga', enabled: true },
+        { type: 'person', phone: '+4915112345678', name: 'Ada', enabled: true },
+      ],
     }], {
       profiles: [{
         id: 'schule',
@@ -231,7 +240,11 @@ describe('Settings config store', () => {
     });
 
     assert.ok(!('whatsappGroupId' in config.profiles[0]));
-    assert.equal(config.profiles[0].whatsappGroups[0].id, '120363000000000002@g.us');
+    assert.ok(!('whatsappGroups' in config.profiles[0]));
+    assert.deepEqual(config.profiles[0].whatsappTargets, [
+      { type: 'group', id: '120363000000000002@g.us', name: 'Orga', enabled: true },
+      { type: 'person', phone: '+4915112345678', name: 'Ada', enabled: true },
+    ]);
   });
 
   it('markiert whatsappGroupId in den Metadaten als versteckt (Legacy-only)', () => {

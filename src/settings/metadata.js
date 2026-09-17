@@ -221,6 +221,15 @@ export const SETTINGS = [
     default: DEFAULTS.stripPrefix,
   },
   {
+    key: 'remindersEnabled',
+    env: 'REMINDERS_ENABLED',
+    group: 'Erinnerungen',
+    label: 'Einzel- und Sammelerinnerungen aktivieren',
+    type: 'boolean',
+    default: DEFAULTS.remindersEnabled,
+    help: 'Unabhängig von der Wochenübersicht. Ausschalten, um ausschließlich Wochenübersichten zu senden.',
+  },
+  {
     key: 'defaultReminders',
     env: 'DEFAULT_REMINDERS',
     group: 'Erinnerungen',
@@ -411,8 +420,19 @@ export const SETTINGS = [
     default: DEFAULTS.whatsappGroupId,
     help: 'Nur fuer die alte Einzelgruppen-Konfiguration ohne Profile (z. B. reine .env-Nutzung). In Profilen ist die Gruppenliste oben massgeblich; dieses Feld wird dort nicht angezeigt und beim Speichern ignoriert.',
     sensitive: true,
-    // In der Profil-GUI ist whatsappGroups[] die alleinige Quelle; dieses Feld bleibt nur fuer
+    // In der Profil-GUI ist whatsappTargets[] die alleinige Quelle; dieses Feld bleibt nur fuer
     // rueckwaertskompatible Top-Level-Konfigurationen (kein config.json `profiles`-Array) relevant.
+    hidden: true,
+  },
+  {
+    key: 'whatsappPhone',
+    env: 'WHATSAPP_PHONE',
+    group: 'WhatsApp & Sicherheit',
+    label: 'WhatsApp-Telefonnummer (Legacy)',
+    type: 'text',
+    default: DEFAULTS.whatsappPhone,
+    help: 'Nur fuer eine einzelne Person in der Top-Level-Konfiguration ohne Profile. In Profilen ist die Zielliste massgeblich.',
+    sensitive: true,
     hidden: true,
   },
   {
@@ -440,6 +460,15 @@ export const SETTINGS = [
     default: DEFAULTS.recordDryRun,
   },
   {
+    key: 'antibanEnabled',
+    env: 'ANTIBAN_ENABLED',
+    group: 'WhatsApp & Sicherheit',
+    label: 'Konservativen Sendeschutz aktivieren',
+    type: 'boolean',
+    default: DEFAULTS.antibanEnabled,
+    help: 'Begrenzt und verteilt Sendevorgänge zeitlich. Verändert keine Nachrichten und kann eine WhatsApp-Sperre nicht garantieren.',
+  },
+  {
     key: 'connectTimeoutMs',
     env: 'CONNECT_TIMEOUT_MS',
     group: 'WhatsApp & Sicherheit',
@@ -451,9 +480,17 @@ export const SETTINGS = [
     key: 'sendDelayMs',
     env: 'SEND_DELAY_MS',
     group: 'WhatsApp & Sicherheit',
-    label: 'Wartezeit nach Senden (ms)',
+    label: 'Minimaler Sendeabstand (ms)',
     type: 'number',
     default: DEFAULTS.sendDelayMs,
+  },
+  {
+    key: 'sendDelayMaxMs',
+    env: 'SEND_DELAY_MAX_MS',
+    group: 'WhatsApp & Sicherheit',
+    label: 'Maximaler Sendeabstand (ms)',
+    type: 'number',
+    default: DEFAULTS.sendDelayMaxMs,
   },
   {
     key: 'dbPath',

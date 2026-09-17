@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadConfig, loadRuntimeConfig } from '../config.js';
+import { WHATSAPP_TARGET_TYPES } from '../messaging/whatsappTarget.js';
 import { SETTINGS, SETTINGS_BY_KEY } from './metadata.js';
 
 const SENSITIVE_MASK = '********';
@@ -64,10 +65,13 @@ export function profilesFromRuntimeConfig(runtime, { includeSensitive = false } 
     name: profile.profileName,
     enabled: profile.enabled,
     values: valuesFromConfig(profile, { includeSensitive }),
-    whatsappGroups: (profile.whatsappGroups ?? []).map((group) => ({
-      id: group.id,
-      name: group.name,
-      enabled: group.enabled,
+    whatsappTargets: (profile.whatsappTargets ?? []).map((target) => ({
+      type: target.type,
+      ...(target.type === WHATSAPP_TARGET_TYPES.PERSON
+        ? { phone: target.phone }
+        : { id: target.id }),
+      name: target.name,
+      enabled: target.enabled,
     })),
   }));
 }
@@ -103,9 +107,37 @@ export function profileIdFromName(name, fallback = 'profile') {
   return normalized || fallback;
 }
 
-function isEmptyGroup(group) {
-  if (typeof group === 'string') return group.trim() === '';
-  return String(group?.id ?? '').trim() === '' && String(group?.name ?? '').trim() === '';
+function isEmptyTarget(target) {
+  if (typeof target === 'string') return target.trim() === '';
+  return (
+    String(target?.id ?? '').trim() === '' &&
+    String(target?.phone ?? '').trim() === '' &&
+    String(target?.name ?? '').trim() === ''
+  );
+}
+
+function targetsFromProfile(profile) {
+  if (Array.isArray(profile.whatsappTargets)) return profile.whatsappTargets;
+  return (profile.whatsappGroups ?? []).map((group) => (
+    typeof group === 'string'
+      ? { type: WHATSAPP_TARGET_TYPES.GROUP, id: group }
+      : { ...group, type: WHATSAPP_TARGET_TYPES.GROUP }
+  ));
+}
+
+function targetForJson(target, index) {
+  const type = target.type === WHATSAPP_TARGET_TYPES.PERSON
+    ? WHATSAPP_TARGET_TYPES.PERSON
+    : WHATSAPP_TARGET_TYPES.GROUP;
+  const address = type === WHATSAPP_TARGET_TYPES.PERSON
+    ? String(target.phone ?? '').trim()
+    : String(target.id ?? '').trim();
+  return {
+    type,
+    ...(type === WHATSAPP_TARGET_TYPES.PERSON ? { phone: address } : { id: address }),
+    name: String(target.name ?? '').trim() || address || `Ziel ${index + 1}`,
+    enabled: target.enabled !== false,
+  };
 }
 
 export function buildProfilesConfigJson(profiles, existing = {}) {
@@ -117,19 +149,19 @@ export function buildProfilesConfigJson(profiles, existing = {}) {
       const id = suppliedId || profileIdFromName(profile.name, `profile-${index + 1}`);
       const existingProfile = existingProfiles.get(id) ?? existingProfiles.get(String(profile.originalId ?? ''));
       const base = buildConfigJson(profile.values, existingProfile ?? {});
-      // Profile sind das massgebliche Modell fuer whatsappGroups[]; ein redundantes/stale
-      // top-level whatsappGroupId (Legacy-Kompatibilitaet) wird hier nicht mitgeschrieben.
+      // Profile sind das maßgebliche Modell für whatsappTargets[]; Legacy-Felder
+      // werden beim expliziten Speichern in das neue Modell überführt.
       delete base.whatsappGroupId;
+      delete base.whatsappPhone;
+      delete base.whatsappGroups;
       return {
         ...base,
         id,
         name: String(profile.name ?? '').trim(),
         enabled: profile.enabled !== false,
-        whatsappGroups: (profile.whatsappGroups ?? []).filter((group) => !isEmptyGroup(group)).map((group, groupIndex) => ({
-          id: String(group.id ?? '').trim(),
-          name: String(group.name ?? '').trim() || String(group.id ?? '').trim() || `Gruppe ${groupIndex + 1}`,
-          enabled: group.enabled !== false,
-        })),
+        whatsappTargets: targetsFromProfile(profile)
+          .filter((target) => !isEmptyTarget(target))
+          .map(targetForJson),
       };
     }),
   };
@@ -181,18 +213,27 @@ export function validateProfiles(profiles, { cwd = process.cwd(), filePath = con
     if (!profile.values || typeof profile.values !== 'object' || Array.isArray(profile.values)) {
       shapeErrors.push(`${label} braucht Einstellungswerte`);
     }
-    if (!Array.isArray(profile.whatsappGroups)) {
-      shapeErrors.push(`${label} braucht eine Liste von WhatsApp-Gruppen`);
+    const targets = targetsFromProfile(profile);
+    if (!Array.isArray(profile.whatsappTargets) && !Array.isArray(profile.whatsappGroups)) {
+      shapeErrors.push(`${label} braucht eine Liste von WhatsApp-Zielen`);
       continue;
     }
-    for (const [groupIndex, group] of profile.whatsappGroups.entries()) {
-      const groupLabel = `WhatsApp-Gruppe ${groupIndex + 1} in ${label}`;
-      if (!group || typeof group !== 'object' || Array.isArray(group)) {
-        shapeErrors.push(`${groupLabel} ist ungültig`);
+    for (const [targetIndex, target] of targets.entries()) {
+      const targetLabel = `WhatsApp-Ziel ${targetIndex + 1} in ${label}`;
+      if (!target || typeof target !== 'object' || Array.isArray(target)) {
+        shapeErrors.push(`${targetLabel} ist ungültig`);
         continue;
       }
-      if (isEmptyGroup(group)) continue;
-      if (!String(group.id ?? '').trim()) shapeErrors.push(`${groupLabel} braucht eine ID`);
+      if (isEmptyTarget(target)) continue;
+      if (![WHATSAPP_TARGET_TYPES.GROUP, WHATSAPP_TARGET_TYPES.PERSON].includes(target.type)) {
+        shapeErrors.push(`${targetLabel} hat einen ungültigen Typ`);
+        continue;
+      }
+      if (target.type === WHATSAPP_TARGET_TYPES.PERSON) {
+        if (!String(target.phone ?? '').trim()) shapeErrors.push(`${targetLabel} braucht eine Telefonnummer`);
+      } else if (!String(target.id ?? '').trim()) {
+        shapeErrors.push(`${targetLabel} braucht eine Gruppen-ID`);
+      }
     }
   }
   if (shapeErrors.length > 0) {

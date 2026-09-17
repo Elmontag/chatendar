@@ -1,7 +1,7 @@
 {
   "name": "chatendar",
   "version": "1.0.0",
-  "description": "Erinnerungsbot: liest Termine aus einem Kalender und schickt Sammel-Erinnerungen in eine WhatsApp-Gruppe",
+  "description": "Erinnerungsbot: liest Termine aus einem Kalender und schickt Sammel-Erinnerungen an WhatsApp-Ziele",
   "type": "module",
   "main": "src/index.js",
   "engines": {
@@ -24,6 +24,7 @@
   "license": "MIT",
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
+    "baileys-antiban": "4.10.0",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "node-ical": "^0.20.1",

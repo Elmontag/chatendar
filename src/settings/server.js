@@ -323,7 +323,7 @@ function page() {
     }
     .group-card {
       display: grid;
-      grid-template-columns: 1.4rem minmax(12rem, 1fr) minmax(14rem, 1.2fr) auto;
+      grid-template-columns: 1.4rem minmax(7rem, .6fr) minmax(10rem, 1fr) minmax(14rem, 1.2fr) auto;
       gap: .45rem;
       align-items: center;
       width: 100%;
@@ -591,7 +591,7 @@ function page() {
           <header class="parameter-dialog-header">
             <div>
               <h2 id="profileDialogTitle">Kalenderprofile verwalten</h2>
-              <p class="help">Jedes Profil hat einen eigenen Einstellungsstack. Mehrere Gruppen im Profil erhalten dieselbe Nachricht. Änderungen wirken sich erst nach „Speichern“ auf <code>config.json</code> aus.</p>
+              <p class="help">Jedes Profil hat einen eigenen Einstellungsstack. Alle aktivierten Gruppen und Personen im Profil erhalten dieselbe Nachricht. Änderungen wirken sich erst nach „Speichern“ auf <code>config.json</code> aus.</p>
             </div>
             <button id="profileDialogClose" class="parameter-dialog-close" type="button" aria-label="Profilverwaltung schließen">×</button>
           </header>
@@ -610,9 +610,12 @@ function page() {
                 <label><span class="label-text">Profil-ID</span><input id="profileId" type="text"></label>
               </details>
             </div>
-            <h3>WhatsApp-Gruppen</h3>
+            <h3>WhatsApp-Ziele</h3>
             <div id="groupList" class="group-list"></div>
-            <button id="addGroup" class="secondary" type="button">Gruppe hinzufügen</button>
+            <div class="profile-actions">
+              <button id="addGroup" class="secondary" type="button">Gruppe hinzufügen</button>
+              <button id="addPerson" class="secondary" type="button">Person hinzufügen</button>
+            </div>
             <div class="whatsapp-import">
               <h4>Gruppen aus WhatsApp übernehmen</h4>
               <p class="help">Liest die Gruppen der gekoppelten WhatsApp-Session dieses Profils (Ordner aus <code>AUTH_DIR</code>). Es werden keine Nachrichten gesendet. Das Koppeln selbst läuft weiterhin über <code>npm run pair</code> im Terminal.</p>
@@ -745,15 +748,20 @@ function page() {
         : enteredId;
       profileId.value = profile.id;
       profile.enabled = profileEnabled.checked;
-      profile.whatsappGroups = [...groupList.querySelectorAll('.group-card')].map((card) => ({
-        enabled: card.querySelector('[data-group-enabled]').checked,
-        name: card.querySelector('[data-group-name]').value,
-        id: card.querySelector('[data-group-id]').value,
-      }));
+      profile.whatsappTargets = [...groupList.querySelectorAll('.group-card')].map((card) => {
+        const type = card.querySelector('[data-target-type]').value;
+        const address = card.querySelector('[data-target-address]').value;
+        return {
+          type,
+          enabled: card.querySelector('[data-target-enabled]').checked,
+          name: card.querySelector('[data-target-name]').value,
+          ...(type === 'person' ? { phone: address } : { id: address }),
+        };
+      });
     }
 
     function activeProfile() {
-      return profiles[selectedProfile] ?? { id: 'default', name: 'Standard', enabled: true, values, whatsappGroups: [] };
+      return profiles[selectedProfile] ?? { id: 'default', name: 'Standard', enabled: true, values, whatsappTargets: [] };
     }
 
     function render() {
@@ -852,7 +860,7 @@ function page() {
       profileId.value = profile.id ?? 'default';
       profileName.value = profile.name ?? profile.id ?? 'Standard';
       profileEnabled.checked = profile.enabled !== false;
-      renderGroups(profile.whatsappGroups ?? []);
+      renderTargets(profile.whatsappTargets ?? []);
       renderProfileSummary();
     }
 
@@ -864,40 +872,55 @@ function page() {
     function renderProfileSummary() {
       if (!profileSummary) return;
       const profile = activeProfile();
-      const groupCount = (profile.whatsappGroups ?? []).length;
-      const groupLabel = groupCount === 1 ? '1 Gruppe' : groupCount + ' Gruppen';
+      const targets = profile.whatsappTargets ?? [];
+      const groupCount = targets.filter(target => target.type !== 'person').length;
+      const personCount = targets.filter(target => target.type === 'person').length;
+      const targetLabel = groupCount + ' Gruppe(n), ' + personCount + ' Person(en)';
       const activeLabel = profile.enabled === false ? 'inaktiv' : 'aktiv';
-      profileSummary.textContent = (profile.name || profile.id || 'Profil') + ' \u2013 ' + activeLabel + ', ' + groupLabel + ' (' + profiles.length + ' Profil(e) insgesamt)';
+      profileSummary.textContent = (profile.name || profile.id || 'Profil') + ' \u2013 ' + activeLabel + ', ' + targetLabel + ' (' + profiles.length + ' Profil(e) insgesamt)';
     }
 
-    function renderGroups(groups) {
+    function renderTargets(targets) {
       groupList.innerHTML = '';
-      for (const group of groups) addGroupRow(group);
+      for (const target of targets) addTargetRow(target);
     }
 
-    function addGroupRow(group = {}) {
+    function addTargetRow(target = {}) {
       const card = document.createElement('div');
       card.className = 'group-card';
+      const type = document.createElement('select');
+      type.dataset.targetType = '1';
+      for (const [value, label] of [['group', 'Gruppe'], ['person', 'Person']]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        type.append(option);
+      }
+      type.value = target.type === 'person' ? 'person' : 'group';
       const enabled = document.createElement('input');
       enabled.type = 'checkbox';
-      enabled.checked = group.enabled !== false;
-      enabled.dataset.groupEnabled = '1';
+      enabled.checked = target.enabled !== false;
+      enabled.dataset.targetEnabled = '1';
       const name = document.createElement('input');
       name.type = 'text';
       name.placeholder = 'Anzeigename';
-      name.value = group.name ?? '';
-      name.dataset.groupName = '1';
-      const id = document.createElement('input');
-      id.type = 'text';
-      id.placeholder = '120363…@g.us';
-      id.value = group.id ?? '';
-      id.dataset.groupId = '1';
+      name.value = target.name ?? '';
+      name.dataset.targetName = '1';
+      const address = document.createElement('input');
+      address.type = 'text';
+      address.value = type.value === 'person' ? (target.phone ?? '') : (target.id ?? '');
+      address.dataset.targetAddress = '1';
+      const updatePlaceholder = () => {
+        address.placeholder = type.value === 'person' ? '+4915112345678' : '120363…@g.us';
+      };
+      type.addEventListener('change', updatePlaceholder);
+      updatePlaceholder();
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'secondary';
       remove.textContent = 'Entfernen';
       remove.addEventListener('click', () => card.remove());
-      card.append(enabled, name, id, remove);
+      card.append(enabled, type, name, address, remove);
       groupList.append(card);
     }
 
@@ -1078,7 +1101,7 @@ function page() {
     async function load() {
       const data = await api('/api/config');
       metadata = data.metadata;
-      profiles = data.profiles?.length ? data.profiles : [{ id: 'default', name: 'Standard', enabled: true, values: data.values, whatsappGroups: [] }];
+      profiles = data.profiles?.length ? data.profiles : [{ id: 'default', name: 'Standard', enabled: true, values: data.values, whatsappTargets: [] }];
       selectedProfile = Math.min(selectedProfile, profiles.length - 1);
       values = activeProfile().values;
       render();
@@ -1144,7 +1167,7 @@ function page() {
         generatedId: true,
         enabled: true,
         values: { ...(base.values ?? values) },
-        whatsappGroups: [],
+        whatsappTargets: [],
       });
       selectedProfile = profiles.length - 1;
       render();
@@ -1160,7 +1183,7 @@ function page() {
         name,
         enabled: base.enabled !== false,
         values: { ...base.values },
-        whatsappGroups: (base.whatsappGroups ?? []).map(group => ({ ...group })),
+        whatsappTargets: (base.whatsappTargets ?? []).map(target => ({ ...target })),
       });
       selectedProfile = profiles.length - 1;
       render();
@@ -1173,15 +1196,17 @@ function page() {
       render();
       refreshTemplatePreview();
     };
-    document.querySelector('#addGroup').onclick = () => addGroupRow({ enabled: true });
+    document.querySelector('#addGroup').onclick = () => addTargetRow({ type: 'group', enabled: true });
+    document.querySelector('#addPerson').onclick = () => addTargetRow({ type: 'person', enabled: true });
 
     const whatsappGroupPicker = document.querySelector('#whatsappGroupPicker');
     const whatsappGroupStatus = document.querySelector('#whatsappGroupStatus');
     const profileStateStatus = document.querySelector('#profileStateStatus');
 
     function existingGroupIds() {
-      return new Set([...groupList.querySelectorAll('[data-group-id]')]
-        .map(input => input.value.trim())
+      return new Set([...groupList.querySelectorAll('.group-card')]
+        .filter(card => card.querySelector('[data-target-type]').value === 'group')
+        .map(card => card.querySelector('[data-target-address]').value.trim())
         .filter(Boolean));
     }
 
@@ -1234,7 +1259,7 @@ function page() {
         const checkbox = card.querySelector('[data-whatsapp-group]');
         const id = card.dataset.waId;
         if (!checkbox || !checkbox.checked || !id || existing.has(id)) continue;
-        addGroupRow({ id, name: card.dataset.waName, enabled: true });
+        addTargetRow({ type: 'group', id, name: card.dataset.waName, enabled: true });
         existing.add(id);
         added += 1;
       }

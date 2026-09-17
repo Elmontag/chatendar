@@ -15,6 +15,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 
+import {
+  normalizePhoneNumber,
+  targetJid,
+  WHATSAPP_TARGET_TYPES,
+} from './messaging/whatsappTarget.js';
 import { parseDurationToMinutes } from './reminders/duration.js';
 import { parseTimeOfDay, parseWeekday } from './reminders/digest.js';
 
@@ -34,6 +39,7 @@ const DEFAULTS = {
   stripPrefix: true,
 
   // Vorlaufzeiten
+  remindersEnabled: true,
   defaultReminders: '1d,2h',
   maxReminders: 2,
   reminderProperty: 'X-WA-REMIND',
@@ -67,11 +73,14 @@ const DEFAULTS = {
 
   // WhatsApp
   whatsappGroupId: '',
+  whatsappPhone: '',
   authDir: './auth_session',
   dryRun: true,
   recordDryRun: false,
+  antibanEnabled: true,
   connectTimeoutMs: 60000,
   sendDelayMs: 1500,
+  sendDelayMaxMs: 7000,
 
   // State
   dbPath: './data/reminders.db',
@@ -148,12 +157,71 @@ function normalizeGroups(value, legacyGroupId) {
   return legacyGroupId ? [normalizeGroup({ id: legacyGroupId, name: 'WhatsApp-Gruppe' })] : [];
 }
 
+function normalizeTarget(target, fallbackName = '') {
+  if (typeof target === 'string') {
+    if (target.trim().endsWith('@g.us')) {
+      return { type: WHATSAPP_TARGET_TYPES.GROUP, id: target, name: fallbackName || target, enabled: true };
+    }
+    return { type: WHATSAPP_TARGET_TYPES.PERSON, phone: target, name: fallbackName || target, enabled: true };
+  }
+
+  const type = target?.type ?? (
+    target?.phone !== undefined ? WHATSAPP_TARGET_TYPES.PERSON : WHATSAPP_TARGET_TYPES.GROUP
+  );
+  const address = type === WHATSAPP_TARGET_TYPES.PERSON ? target?.phone : target?.id;
+  return {
+    type,
+    ...(type === WHATSAPP_TARGET_TYPES.PERSON
+      ? { phone: String(address ?? '').trim() }
+      : { id: String(address ?? '').trim() }),
+    name: String(target?.name ?? address ?? fallbackName ?? '').trim(),
+    enabled: toBool(target?.enabled, true),
+  };
+}
+
+function isEmptyTarget(target) {
+  if (typeof target === 'string') return target.trim() === '';
+  return (
+    String(target?.id ?? '').trim() === '' &&
+    String(target?.phone ?? '').trim() === '' &&
+    String(target?.name ?? '').trim() === ''
+  );
+}
+
+function normalizeTargets(value, legacyGroups, legacyPhone) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((target) => !isEmptyTarget(target))
+      .map((target, index) => normalizeTarget(target, `Ziel ${index + 1}`));
+  }
+
+  const groups = legacyGroups.map((group) => ({
+    type: WHATSAPP_TARGET_TYPES.GROUP,
+    id: group.id,
+    name: group.name,
+    enabled: group.enabled,
+  }));
+  if (legacyPhone) {
+    groups.push({
+      type: WHATSAPP_TARGET_TYPES.PERSON,
+      phone: String(legacyPhone),
+      name: 'WhatsApp-Person',
+      enabled: true,
+    });
+  }
+  return groups;
+}
+
 function profileId(value, fallback = '') {
   const raw = String(value ?? '').trim();
   return raw || fallback;
 }
 
 function buildResolvedConfig(f, env, overrides, cwd, filePath) {
+  const legacyGroupId = pick(overrides.whatsappGroupId, env.WHATSAPP_GROUP_ID, f.whatsappGroupId, '');
+  const whatsappGroups = normalizeGroups(overrides.whatsappGroups ?? f.whatsappGroups, legacyGroupId);
+  const whatsappPhone =
+    pick(overrides.whatsappPhone, env.WHATSAPP_PHONE, f.whatsappPhone, DEFAULTS.whatsappPhone) ?? '';
   const resolved = {
     source: String(pick(env.SOURCE, f.source, DEFAULTS.source)).toLowerCase(),
     icsPath: pick(env.ICS_PATH, f.icsPath, DEFAULTS.icsPath),
@@ -171,6 +239,7 @@ function buildResolvedConfig(f, env, overrides, cwd, filePath) {
     selectPrefix: pick(env.SELECT_PREFIX, f.selectPrefix, DEFAULTS.selectPrefix),
     stripPrefix: toBool(pick(env.STRIP_PREFIX, f.stripPrefix), DEFAULTS.stripPrefix),
 
+    remindersEnabled: toBool(pick(env.REMINDERS_ENABLED, f.remindersEnabled), DEFAULTS.remindersEnabled),
     defaultReminders: pick(env.DEFAULT_REMINDERS, f.defaultReminders, DEFAULTS.defaultReminders),
     maxReminders: toInt(pick(env.MAX_REMINDERS, f.maxReminders), DEFAULTS.maxReminders, 'MAX_REMINDERS'),
     reminderProperty: pick(env.REMINDER_PROPERTY, f.reminderProperty, DEFAULTS.reminderProperty),
@@ -204,13 +273,21 @@ function buildResolvedConfig(f, env, overrides, cwd, filePath) {
     templateDigestEmpty: unescape(pick(env.TEMPLATE_DIGEST_EMPTY, f.templateDigestEmpty, DEFAULTS.templateDigestEmpty)),
     digestSeparator: unescape(pick(env.DIGEST_SEPARATOR, f.digestSeparator) ?? DEFAULTS.digestSeparator),
 
-    whatsappGroupId: pick(env.WHATSAPP_GROUP_ID, f.whatsappGroupId, DEFAULTS.whatsappGroupId) ?? '',
-    whatsappGroups: normalizeGroups(f.whatsappGroups, pick(env.WHATSAPP_GROUP_ID, f.whatsappGroupId, '')),
+    whatsappGroupId: legacyGroupId,
+    whatsappPhone,
+    whatsappGroups,
+    whatsappTargets: normalizeTargets(overrides.whatsappTargets ?? f.whatsappTargets, whatsappGroups, whatsappPhone),
     authDir: pick(env.AUTH_DIR, f.authDir, DEFAULTS.authDir),
     dryRun: toBool(pick(env.DRY_RUN, f.dryRun), DEFAULTS.dryRun),
     recordDryRun: toBool(pick(env.RECORD_DRY_RUN, f.recordDryRun), DEFAULTS.recordDryRun),
+    antibanEnabled: toBool(pick(env.ANTIBAN_ENABLED, f.antibanEnabled), DEFAULTS.antibanEnabled),
     connectTimeoutMs: toInt(pick(env.CONNECT_TIMEOUT_MS, f.connectTimeoutMs), DEFAULTS.connectTimeoutMs, 'CONNECT_TIMEOUT_MS'),
     sendDelayMs: toInt(pick(env.SEND_DELAY_MS, f.sendDelayMs), DEFAULTS.sendDelayMs, 'SEND_DELAY_MS'),
+    sendDelayMaxMs: toInt(
+      pick(env.SEND_DELAY_MAX_MS, f.sendDelayMaxMs),
+      DEFAULTS.sendDelayMaxMs,
+      'SEND_DELAY_MAX_MS',
+    ),
 
     dbPath: pick(env.DB_PATH, f.dbPath, DEFAULTS.dbPath),
     pruneAfterDays: toInt(pick(env.PRUNE_AFTER_DAYS, f.pruneAfterDays), DEFAULTS.pruneAfterDays, 'PRUNE_AFTER_DAYS'),
@@ -220,9 +297,9 @@ function buildResolvedConfig(f, env, overrides, cwd, filePath) {
     ...overrides,
   };
 
-  if (resolved.whatsappGroups.length === 0 && resolved.whatsappGroupId) {
-    resolved.whatsappGroups = normalizeGroups(null, resolved.whatsappGroupId);
-  }
+  resolved.whatsappGroups = resolved.whatsappTargets
+    .filter((target) => target.type === WHATSAPP_TARGET_TYPES.GROUP)
+    .map(({ id, name, enabled }) => ({ id, name, enabled }));
   if (!resolved.whatsappGroupId && resolved.whatsappGroups.length > 0) {
     resolved.whatsappGroupId = resolved.whatsappGroups.find((group) => group.enabled)?.id ?? resolved.whatsappGroups[0].id;
   }
@@ -259,14 +336,13 @@ export function loadRuntimeConfig({ configFile, overrides = {}, env = process.en
   const { filePath, fileConfig } = readConfigFile({ configFile, env, cwd });
   const root = buildResolvedConfig(fileConfig, env, overrides, cwd, filePath);
   const explicitProfiles = Array.isArray(fileConfig.profiles) ? fileConfig.profiles : null;
+  if (!explicitProfiles) validate(root);
   const profiles = explicitProfiles
     ? explicitProfiles.map((profile, index) => {
       const merged = buildResolvedConfig(profile, {}, overrides, cwd, filePath);
       merged.profileId = profileId(profile.id, `profile-${index + 1}`);
       merged.profileName = String(profile.name ?? merged.profileId);
       merged.enabled = toBool(profile.enabled, true);
-      merged.whatsappGroups = normalizeGroups(profile.whatsappGroups, profile.whatsappGroupId ?? '');
-      merged.whatsappGroupId = merged.whatsappGroups.find((group) => group.enabled)?.id ?? merged.whatsappGroups[0]?.id ?? '';
       validate(merged);
       return merged;
     })
@@ -275,7 +351,6 @@ export function loadRuntimeConfig({ configFile, overrides = {}, env = process.en
       profileId: 'default',
       profileName: 'Standard',
       enabled: true,
-      whatsappGroups: normalizeGroups(root.whatsappGroups, root.whatsappGroupId),
     }];
 
   const runtime = {
@@ -353,13 +428,47 @@ export function validate(config) {
     }
   }
 
-  // Gruppen-ID nur im Echtbetrieb zwingend – Dry-Runs sollen ohne Kopplung laufen.
-  if (!config.dryRun) {
-    if (!config.whatsappGroupId) {
-      errors.push('WHATSAPP_GROUP_ID muss gesetzt sein, wenn DRY_RUN=false');
-    } else if (!config.whatsappGroupId.endsWith('@g.us')) {
-      errors.push(`WHATSAPP_GROUP_ID muss auf "@g.us" enden (ist: "${config.whatsappGroupId}")`);
+  const targetIds = new Set();
+  for (const target of config.whatsappTargets ?? []) {
+    let jid = '';
+    if (target.type === WHATSAPP_TARGET_TYPES.GROUP) {
+      target.id = String(target.id ?? '').trim();
+      if (!target.id) {
+        errors.push(`WhatsApp-Gruppe "${target.name || 'ohne Namen'}" braucht eine ID`);
+        continue;
+      }
+      if (!target.id.endsWith('@g.us')) {
+        errors.push(`WhatsApp-Gruppe "${target.name || target.id}" muss auf "@g.us" enden`);
+        continue;
+      }
+      jid = target.id;
+    } else if (target.type === WHATSAPP_TARGET_TYPES.PERSON) {
+      try {
+        target.phone = normalizePhoneNumber(target.phone);
+        jid = targetJid(target);
+      } catch (error) {
+        errors.push(`WhatsApp-Person "${target.name || target.phone || 'ohne Namen'}": ${error.message}`);
+        continue;
+      }
+    } else {
+      errors.push(`Unbekannter WhatsApp-Zieltyp "${target.type}"`);
+      continue;
     }
+    if (targetIds.has(jid)) errors.push(`WhatsApp-Ziel "${jid}" ist doppelt`);
+    targetIds.add(jid);
+    target.jid = jid;
+  }
+
+  // Ziele sind nur im Echtbetrieb zwingend – Dry-Runs sollen ohne Kopplung laufen.
+  if (!config.dryRun && config.enabled !== false) {
+    const enabledTargets = (config.whatsappTargets ?? []).filter((target) => target.enabled);
+    if (enabledTargets.length === 0) {
+      errors.push('WHATSAPP_GROUP_ID oder WHATSAPP_PHONE muss gesetzt sein, wenn DRY_RUN=false');
+    }
+  }
+  if (config.sendDelayMs < 0) errors.push('SEND_DELAY_MS darf nicht negativ sein');
+  if (config.sendDelayMaxMs < config.sendDelayMs) {
+    errors.push('SEND_DELAY_MAX_MS muss größer oder gleich SEND_DELAY_MS sein');
   }
 
   try {
@@ -387,26 +496,16 @@ export function validateRuntimeConfig(runtime) {
     if (!/^[a-zA-Z0-9_.-]+$/.test(profile.profileId)) {
       errors.push(`Profil-ID "${profile.profileId}" darf nur Buchstaben, Zahlen, ".", "_" und "-" enthalten`);
     }
-    const groupIds = new Set();
-    for (const group of profile.whatsappGroups ?? []) {
-      if (!group.id) {
-        errors.push(`WhatsApp-Gruppe in Profil "${profile.profileId}" braucht eine ID`);
-      } else if (groupIds.has(group.id)) {
-        errors.push(`WhatsApp-Gruppen-ID "${group.id}" ist in Profil "${profile.profileId}" doppelt`);
+    const targetIds = new Set();
+    for (const target of profile.whatsappTargets ?? []) {
+      if (targetIds.has(target.jid)) {
+        errors.push(`WhatsApp-Ziel "${target.jid}" ist in Profil "${profile.profileId}" doppelt`);
       }
-      groupIds.add(group.id);
+      targetIds.add(target.jid);
     }
-    const enabledGroups = (profile.whatsappGroups ?? []).filter((group) => group.enabled);
-    if (!profile.dryRun && enabledGroups.length === 0) {
-      if (profile.profileId === 'default') errors.push('WHATSAPP_GROUP_ID muss gesetzt sein, wenn DRY_RUN=false');
-      errors.push(`Profil "${profile.profileId}" braucht im Live-Modus mindestens eine aktive WhatsApp-Gruppe`);
-    }
-    if (!profile.dryRun) {
-      for (const group of enabledGroups) {
-        if (!group.id.endsWith('@g.us')) {
-          errors.push(`WhatsApp-Gruppe "${group.name || group.id}" in Profil "${profile.profileId}" muss auf "@g.us" enden`);
-        }
-      }
+    const enabledTargets = (profile.whatsappTargets ?? []).filter((target) => target.enabled);
+    if (profile.enabled && !profile.dryRun && enabledTargets.length === 0) {
+      errors.push(`Profil "${profile.profileId}" braucht im Live-Modus mindestens ein aktives WhatsApp-Ziel`);
     }
   }
   if ((runtime.enabledProfiles ?? []).length === 0) {

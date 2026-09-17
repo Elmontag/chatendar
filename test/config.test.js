@@ -26,8 +26,11 @@ describe('Konfiguration', () => {
     const config = lade();
     assert.equal(config.source, 'file');
     assert.equal(config.dryRun, true, 'Dry-Run muss der sichere Default sein');
+    assert.equal(config.remindersEnabled, true);
     assert.equal(config.defaultReminders, '1d,2h');
     assert.equal(config.maxReminders, 2);
+    assert.equal(config.antibanEnabled, true);
+    assert.equal(config.sendDelayMaxMs, 7000);
   });
 
   it('löst Pfade absolut auf', () => {
@@ -46,6 +49,10 @@ describe('Konfiguration', () => {
   it('wandelt \\n in Templates in echte Zeilenumbrüche', () => {
     const config = lade({ TEMPLATE_SINGLE: 'A\\nB' });
     assert.equal(config.templateSingle, 'A\nB');
+  });
+
+  it('liest den Schalter für Einzel- und Sammelerinnerungen', () => {
+    assert.equal(lade({ REMINDERS_ENABLED: 'false' }).remindersEnabled, false);
   });
 
   it('lässt CLI-Overrides gewinnen', () => {
@@ -82,6 +89,86 @@ describe('Konfiguration', () => {
     assert.equal(runtime.enabledProfiles.length, 1);
     assert.equal(runtime.enabledProfiles[0].profileId, 'default');
     assert.equal(runtime.enabledProfiles[0].whatsappGroups[0].id, '120363000000000000@g.us');
+    assert.equal(runtime.enabledProfiles[0].whatsappTargets[0].type, 'group');
+    assert.equal(runtime.enabledProfiles[0].whatsappTargets[0].jid, '120363000000000000@g.us');
+  });
+
+  it('normalisiert eine Telefonnummer aus der Umgebung als Personenziel', () => {
+    const runtime = loadRuntimeConfig({
+      configFile: KEINE_CONFIG,
+      env: { WHATSAPP_PHONE: '+49 151 123-45-678' },
+      cwd: REPO_ROOT,
+    });
+
+    assert.deepEqual(
+      runtime.enabledProfiles[0].whatsappTargets.map(({ type, phone, jid }) => ({ type, phone, jid })),
+      [{ type: 'person', phone: '+4915112345678', jid: '4915112345678@s.whatsapp.net' }],
+    );
+  });
+
+  it('liest gemischte Gruppen- und Personenziele eines Profils', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [{
+        id: 'gemischt',
+        name: 'Gemischt',
+        whatsappTargets: [
+          { type: 'group', id: '120363000000000001@g.us', name: 'Gruppe' },
+          { type: 'person', phone: '0049 151 12345678', name: 'Ada' },
+        ],
+      }],
+    });
+    try {
+      const runtime = loadRuntimeConfig({ configFile: file, env: {}, cwd: dir });
+      assert.deepEqual(runtime.profiles[0].whatsappTargets.map((target) => target.jid), [
+        '120363000000000001@g.us',
+        '4915112345678@s.whatsapp.net',
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verlangt im Live-Modus keine Ziele für deaktivierte Profile', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [
+        {
+          id: 'aktiv',
+          name: 'Aktiv',
+          whatsappTargets: [{ type: 'person', phone: '+49 151 12345678', name: 'Ada' }],
+        },
+        {
+          id: 'inaktiv',
+          name: 'Inaktiv',
+          enabled: false,
+          whatsappTargets: [],
+        },
+      ],
+    });
+    try {
+      const runtime = loadRuntimeConfig({
+        configFile: file,
+        env: {},
+        overrides: { dryRun: false },
+        cwd: dir,
+      });
+      assert.deepEqual(runtime.enabledProfiles.map((profile) => profile.profileId), ['aktiv']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('behandelt eine explizit leere Zielliste als maßgeblich', () => {
+    const { dir, file } = writeTempConfig({
+      whatsappGroupId: '120363000000000001@g.us',
+      whatsappPhone: '+4915112345678',
+      whatsappTargets: [],
+    });
+    try {
+      const runtime = loadRuntimeConfig({ configFile: file, env: {}, cwd: dir });
+      assert.deepEqual(runtime.profiles[0].whatsappTargets, []);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('leitet whatsappGroupId (Legacy) aus der ersten aktiven Gruppe eines Profils ab', () => {
@@ -184,7 +271,11 @@ describe('Validierung', () => {
 
   it('verlangt die Gruppen-ID nur im Live-Modus', () => {
     assert.doesNotThrow(() => lade({ DRY_RUN: 'true', WHATSAPP_GROUP_ID: '' }));
-    assert.throws(() => lade({ DRY_RUN: 'false', WHATSAPP_GROUP_ID: '' }), /WHATSAPP_GROUP_ID muss gesetzt sein/);
+    assert.throws(
+      () => lade({ DRY_RUN: 'false', WHATSAPP_GROUP_ID: '' }),
+      /WHATSAPP_GROUP_ID oder WHATSAPP_PHONE muss gesetzt sein/,
+    );
+    assert.doesNotThrow(() => lade({ DRY_RUN: 'false', WHATSAPP_PHONE: '+4915112345678' }));
   });
 
   it('lehnt eine ungültige Zeitzone ab', () => {
@@ -242,7 +333,7 @@ describe('Validierung', () => {
     try {
       assert.throws(
         () => loadRuntimeConfig({ configFile: file, env: {}, cwd: dir }),
-        /WhatsApp-Gruppen-ID .* doppelt.*Mindestens ein Profil muss aktiviert sein/s,
+        /WhatsApp-Ziel .* doppelt/,
       );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -306,7 +397,7 @@ describe('Validierung', () => {
     try {
       assert.throws(
         () => loadRuntimeConfig({ configFile: empty.file, env: {}, cwd: empty.dir }),
-        /WHATSAPP_GROUP_ID muss gesetzt sein|braucht im Live-Modus mindestens eine aktive WhatsApp-Gruppe/,
+        /WHATSAPP_GROUP_ID oder WHATSAPP_PHONE muss gesetzt sein|braucht im Live-Modus mindestens ein aktives WhatsApp-Ziel/,
       );
       assert.throws(
         () => loadRuntimeConfig({ configFile: invalid.file, env: {}, cwd: invalid.dir }),
@@ -315,6 +406,39 @@ describe('Validierung', () => {
     } finally {
       fs.rmSync(empty.dir, { recursive: true, force: true });
       fs.rmSync(invalid.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lehnt ungültige oder doppelte Personenziele ab', () => {
+    const invalid = writeTempConfig({
+      profiles: [{
+        id: 'privat',
+        name: 'Privat',
+        whatsappTargets: [{ type: 'person', phone: '0151 12345678', name: 'Ada' }],
+      }],
+    });
+    const duplicate = writeTempConfig({
+      profiles: [{
+        id: 'privat',
+        name: 'Privat',
+        whatsappTargets: [
+          { type: 'person', phone: '+49 151 12345678', name: 'Ada' },
+          { type: 'person', phone: '004915112345678', name: 'Ada doppelt' },
+        ],
+      }],
+    });
+    try {
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: invalid.file, env: {}, cwd: invalid.dir }),
+        /international mit Ländervorwahl/,
+      );
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: duplicate.file, env: {}, cwd: duplicate.dir }),
+        /WhatsApp-Ziel .* ist doppelt/,
+      );
+    } finally {
+      fs.rmSync(invalid.dir, { recursive: true, force: true });
+      fs.rmSync(duplicate.dir, { recursive: true, force: true });
     }
   });
 });

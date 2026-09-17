@@ -4,7 +4,7 @@
  * Verantwortlichkeiten:
  *  - Session aus AUTH_DIR laden bzw. beim ersten Start per QR-Code koppeln
  *  - Verbindung aufbauen und auf "open" warten, bevor gesendet wird
- *  - Textnachrichten an eine feste Gruppen-ID senden
+ *  - Textnachrichten geschützt an Gruppen und Einzelpersonen senden
  *  - Verbindung sauber schließen (ohne die Session zu löschen!)
  *
  * Wichtig: `close()` beendet nur den Socket. Ein `logout()` würde die
@@ -22,10 +22,13 @@ import {
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
+import { classifyDisconnect } from 'baileys-antiban';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 
 import { log } from '../logger.js';
+import { createSendGuard } from './sendGuard.js';
+import { targetAddress, targetJid, WHATSAPP_TARGET_TYPES } from './whatsappTarget.js';
 
 /** Baileys ist sehr gesprächig – eigenes Logging reicht uns. */
 const silentLogger = pino({ level: 'silent' });
@@ -36,8 +39,35 @@ const RETRYABLE = new Set([
   DisconnectReason.connectionLost,
   DisconnectReason.restartRequired,
   DisconnectReason.timedOut,
+  DisconnectReason.unavailableService,
+]);
+
+const FATAL = new Set([
+  DisconnectReason.loggedOut,
+  DisconnectReason.forbidden,
+  DisconnectReason.badSession,
+  DisconnectReason.multideviceMismatch,
   DisconnectReason.connectionReplaced,
 ]);
+
+export function disconnectPolicy(code) {
+  if (FATAL.has(code)) {
+    return { shouldReconnect: false, retryAfterMs: 0, reason: 'WhatsApp-Session muss geprüft oder neu gekoppelt werden' };
+  }
+  const classified = Number.isInteger(code) ? classifyDisconnect(code) : null;
+  if (RETRYABLE.has(code)) {
+    return {
+      shouldReconnect: true,
+      retryAfterMs: code === DisconnectReason.restartRequired ? 2000 : (classified?.backoffMs ?? 2000),
+      reason: classified?.message,
+    };
+  }
+  return {
+    shouldReconnect: classified?.category !== 'unknown' && (classified?.shouldReconnect ?? false),
+    retryAfterMs: classified?.backoffMs ?? 0,
+    reason: classified?.message,
+  };
+}
 
 /** Statuscode aus einem Baileys-/Boom-Fehler extrahieren. */
 function statusCodeOf(error) {
@@ -121,7 +151,7 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
     log.warn(
       `Verbindungsversuch ${attempt}/${maxAttempts} fehlgeschlagen (${outcome.reasonText}) – neuer Versuch`,
     );
-    await delay(2000 * attempt);
+    await delay(outcome.retryAfterMs ?? 2000 * attempt);
   }
 
   throw new Error(
@@ -132,7 +162,7 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
 /**
  * Wartet auf "connection: open" bzw. einen endgültigen Abbruch.
  *
- * @returns {Promise<{connected: boolean, error?: Error, reasonText?: string}>}
+ * @returns {Promise<{connected: boolean, error?: Error, reasonText?: string, retryAfterMs?: number}>}
  *          Auflösung mit connected=false bedeutet "erneut versuchen".
  *          Endgültige Fehler werden geworfen.
  */
@@ -204,13 +234,17 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
           return;
         }
 
-        if (RETRYABLE.has(code)) {
+        const policy = disconnectPolicy(code);
+        if (policy.shouldReconnect) {
           // restartRequired tritt regulär direkt nach dem Scannen auf.
           finish(() =>
             resolve({
               connected: false,
               error,
-              reasonText: `Code ${code}${code === DisconnectReason.restartRequired ? ' (Neustart nach Kopplung)' : ''}`,
+              reasonText:
+                `Code ${code}${code === DisconnectReason.restartRequired ? ' (Neustart nach Kopplung)' : ''}` +
+                (policy.reason ? ` – ${policy.reason}` : ''),
+              retryAfterMs: policy.retryAfterMs,
             }),
           );
           return;
@@ -231,23 +265,53 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
 }
 
 /** Öffentliche Client-Schnittstelle um den Socket herum. */
-function buildClient(socket, config) {
+export function buildClient(socket, config) {
+  const sendGuard = createSendGuard(config);
+  const verifiedPeople = new Map();
+
+  sendGuard.onReconnect();
+
+  const onConnectionUpdate = ({ connection, lastDisconnect }) => {
+    if (connection === 'close') sendGuard.onDisconnect(statusCodeOf(lastDisconnect?.error));
+    if (connection === 'open') sendGuard.onReconnect();
+  };
+  socket.ev.on('connection.update', onConnectionUpdate);
+
+  async function resolveRecipient(target) {
+    const jid = targetJid(target);
+    if (target?.type !== WHATSAPP_TARGET_TYPES.PERSON) return jid;
+    if (verifiedPeople.has(jid)) return verifiedPeople.get(jid);
+    if (typeof socket.onWhatsApp !== 'function') {
+      throw new Error('Die WhatsApp-Erreichbarkeit der Telefonnummer kann nicht geprüft werden');
+    }
+
+    const result = await socket.onWhatsApp(jid.slice(0, jid.indexOf('@')));
+    const match = result?.find((entry) => entry?.exists);
+    if (!match?.jid) {
+      throw new Error(`Telefonnummer "${target.phone}" ist nicht bei WhatsApp registriert`);
+    }
+    verifiedPeople.set(jid, match.jid);
+    return match.jid;
+  }
+
   return {
     user: socket.user,
 
     /**
      * Textnachricht senden.
-     * @param {string} jid Ziel (Gruppen-ID, endet auf @g.us)
+     * @param {object|string} target Kanonisches Ziel oder bestehende JID
      * @param {string} text
      */
-    async sendText(jid, text) {
+    async sendText(target, text) {
+      const address = typeof target === 'string' ? target : targetAddress(target);
       try {
-        const result = await socket.sendMessage(jid, { text });
+        const jid = typeof target === 'string' ? target : await resolveRecipient(target);
+        const result = await sendGuard.send(jid, text, () => socket.sendMessage(jid, { text }));
         return result?.key?.id ?? null;
       } catch (error) {
         throw new Error(
-          `Nachricht an "${jid}" konnte nicht gesendet werden: ${error.message}\n` +
-            '   Stimmt WHATSAPP_GROUP_ID? Die ID lässt sich mit "npm run pair" auflisten.',
+          `Nachricht an "${address}" konnte nicht gesendet werden: ${error.message}\n` +
+            '   Gruppen-ID bzw. Telefonnummer und WhatsApp-Kopplung prüfen.',
         );
       }
     },
@@ -260,8 +324,7 @@ function buildClient(socket, config) {
 
     /** Socket schließen – die Session bleibt erhalten. */
     async close() {
-      // Kurz warten, damit ausgehende Nachrichten den Server sicher erreichen.
-      await delay(config.sendDelayMs);
+      socket.ev.off('connection.update', onConnectionUpdate);
       safeEnd(socket);
     },
   };

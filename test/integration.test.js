@@ -148,6 +148,18 @@ describe('Prüffenster', () => {
 describe('Wochenübersicht', () => {
   const digestEnv = { DIGEST_ENABLED: 'true', DIGEST_DAY: 'fr', DIGEST_TIME: '18:00' };
 
+  it('kann ausschließlich die Wochenübersicht verschicken', () => {
+    const ausgabe = lauf({
+      now: '2026-09-18T16:00:00Z',
+      env: { ...digestEnv, REMINDERS_ENABLED: 'false' },
+    });
+
+    assert.match(ausgabe, /Wochenübersicht fällig/);
+    assert.match(ausgabe, /Termine der kommenden Woche/);
+    assert.doesNotMatch(ausgabe, /Erinnerung\(en\) fällig/);
+    assert.doesNotMatch(ausgabe, /Termin\(e\), (?:1d|2h) vorher/);
+  });
+
   it('verschickt am Versandzeitpunkt eine Liste der kommenden Woche', () => {
     // Freitag, 18.09.2026, 18:00 Berlin
     const ausgabe = lauf({ now: '2026-09-18T16:00:00Z', env: digestEnv });
@@ -222,6 +234,22 @@ describe('Vorschau-Modus', () => {
     assert.match(ausgabe, /Wochenübersicht: nächster Versand 2026-09-18 18:00/);
   });
 
+  it('zeigt bei deaktivierten Erinnerungen nur die Wochenübersicht', () => {
+    const ausgabe = lauf({
+      now: '2026-09-16T21:00:00Z',
+      args: ['--preview'],
+      env: {
+        REMINDERS_ENABLED: 'false',
+        DIGEST_ENABLED: 'true',
+        DIGEST_DAY: 'fr',
+        DIGEST_TIME: '18:00',
+      },
+    });
+    assert.match(ausgabe, /Einzel- und Sammelerinnerungen: deaktiviert/);
+    assert.match(ausgabe, /Wochenübersicht: nächster Versand/);
+    assert.doesNotMatch(ausgabe, /vorher →/);
+  });
+
   it('weist darauf hin, wenn kein Termin markiert ist', () => {
     const ausgabe = lauf({
       now: '2026-09-16T21:00:00Z',
@@ -274,6 +302,28 @@ describe('Mehrere Profile und Gruppen', () => {
     assert.match(ausgabe, /Nachricht an Klasse 3 \(120363000000000001@g\.us\)/);
     assert.match(ausgabe, /Nachricht an Orga \(120363000000000002@g\.us\)/);
     assert.equal((ausgabe.match(/Schule: 2 Termine/g) ?? []).length, 2);
+  });
+
+  it('sendet im Dry-Run dieselbe Profilnachricht an Gruppen und Personen', () => {
+    const { file } = neueConfigDatei({
+      profiles: [{
+        id: 'gemischt',
+        name: 'Gemischt',
+        source: 'file',
+        icsPath: path.join(FIXTURES, 'beispiel.ics'),
+        defaultReminders: '1d',
+        whatsappTargets: [
+          { type: 'group', id: '120363000000000001@g.us', name: 'Klasse 3' },
+          { type: 'person', phone: '+49 151 12345678', name: 'Ada' },
+        ],
+      }],
+    });
+
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Nachricht an Klasse 3 \(120363000000000001@g\.us\)/);
+    assert.match(ausgabe, /Nachricht an Ada \(\+4915112345678\)/);
+    assert.equal((ausgabe.match(/2 Termin\(e\), 1d vorher/g) ?? []).length, 2);
   });
 
   it('führt mehrere Profile mit eigenem Einstellungsstack aus', () => {
@@ -427,6 +477,48 @@ describe('Mehrere Profile und Gruppen', () => {
     assert.doesNotMatch(ausgabe, /Nachricht an Orga \(120363000000000002@g\.us\)/);
     assert.equal((ausgabe.match(/Schule: 2 Termine/g) ?? []).length, 1);
   });
+
+  it('verarbeitet nur aktive Profile und aktive Gruppen- oder Personenziele', () => {
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'aktiv',
+          name: 'Aktives Profil',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          whatsappTargets: [
+            { type: 'group', id: '120363000000000001@g.us', name: 'Aktive Gruppe', enabled: true },
+            { type: 'group', id: '120363000000000002@g.us', name: 'Inaktive Gruppe', enabled: false },
+            { type: 'person', phone: '+4915112345678', name: 'Aktive Person', enabled: true },
+            { type: 'person', phone: '+4915112345679', name: 'Inaktive Person', enabled: false },
+          ],
+        },
+        {
+          id: 'inaktiv',
+          name: 'Inaktives Profil',
+          enabled: false,
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          whatsappTargets: [
+            { type: 'person', phone: '+4915112345680', name: 'Person im inaktiven Profil', enabled: true },
+          ],
+        },
+      ],
+    });
+
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Profil "Aktives Profil" gestartet/);
+    assert.doesNotMatch(ausgabe, /Profil "Inaktives Profil" gestartet/);
+    assert.match(ausgabe, /Nachricht an Aktive Gruppe \(120363000000000001@g\.us\)/);
+    assert.match(ausgabe, /Nachricht an Aktive Person \(\+4915112345678\)/);
+    assert.doesNotMatch(ausgabe, /Nachricht an Inaktive Gruppe/);
+    assert.doesNotMatch(ausgabe, /Nachricht an Inaktive Person/);
+    assert.doesNotMatch(ausgabe, /Nachricht an Person im inaktiven Profil/);
+    assert.equal((ausgabe.match(/2 Termin\(e\), 1d vorher/g) ?? []).length, 2);
+  });
 });
 
 describe('Fehlerbehandlung', () => {
@@ -452,7 +544,7 @@ describe('Fehlerbehandlung', () => {
         }),
       (error) => {
         assert.equal(error.status, 1);
-        assert.match(error.stderr, /WHATSAPP_GROUP_ID muss gesetzt sein/);
+        assert.match(error.stderr, /WHATSAPP_GROUP_ID oder WHATSAPP_PHONE muss gesetzt sein/);
         return true;
       },
     );

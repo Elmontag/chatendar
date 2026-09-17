@@ -1,7 +1,8 @@
 # chatendar
 
 Liest Termine aus einem Kalender, berücksichtigt konfigurierbare Vorlaufzeiten
-pro Termin und schickt daraus Erinnerungen in eine WhatsApp-Gruppe. Mehrere
+pro Termin und schickt daraus Erinnerungen an WhatsApp-Gruppen oder
+Einzelpersonen. Mehrere
 gleichzeitig fällige Termine werden zu **einer** Sammelnachricht gebündelt.
 
 Das Tool führt pro Aufruf genau **einen** Durchlauf aus und beendet sich
@@ -12,14 +13,16 @@ Cronjob – siehe [Automatisierung](#automatisierung).
 
 - **Mehrere Kalenderprofile** – jeder Kalender hat seinen eigenen vollständigen
   Einstellungsstack
-- **Mehrere WhatsApp-Gruppen pro Profil** – dieselbe Profilnachricht kann an
-  mehrere Gruppen gehen
+- **Mehrere WhatsApp-Ziele pro Profil** – dieselbe Profilnachricht kann an
+  Gruppen und Einzelpersonen gehen
+- **Konservativer Sendeschutz** – `baileys-antiban` begrenzt und verteilt
+  ausgehende Nachrichten zeitlich, ohne deren Inhalt zu verändern
 - **Kalenderquelle austauschbar** – lokale ICS-Datei oder CalDAV/Nextcloud
 - **Gezielte Auswahl** – nur Termine, die per Kategorie (`WhatsApp`) und/oder
   Titel-Präfix (`[WA]`) markiert sind; abschaltbar, dann zählen alle Termine
 - **Bis zu zwei Vorlaufzeiten pro Termin** – global konfigurierbar, pro Termin
   über `X-WA-REMIND` überschreibbar
-- **Kein Doppelversand** – jede Kombination aus Profil, Zielgruppe, Termin und
+- **Kein Doppelversand** – jede Kombination aus Profil, WhatsApp-Ziel, Termin und
   Vorlaufzeit-Stufe wird dauerhaft in SQLite vermerkt
 - **Sammelnachrichten** – alles, was in einem Lauf zur selben Vorlaufzeit-Stufe
   fällig ist, landet in einer Nachricht
@@ -48,7 +51,7 @@ $EDITOR .env
 ```
 
 Mindestens anzupassen sind `ICS_PATH` und – sobald wirklich gesendet werden
-soll – `WHATSAPP_GROUP_ID` sowie `DRY_RUN=false`.
+soll – `WHATSAPP_GROUP_ID` oder `WHATSAPP_PHONE` sowie `DRY_RUN=false`.
 
 ### Konfigurationsformen
 
@@ -62,10 +65,17 @@ WHATSAPP_GROUP_ID=120363000000000000@g.us
 DRY_RUN=true
 ```
 
+Für den direkten Versand an eine einzelne Person kann stattdessen eine
+internationale Telefonnummer angegeben werden:
+
+```ini
+WHATSAPP_PHONE=+4915112345678
+```
+
 Für mehrere Kalender werden stattdessen explizite `profiles[]` in
 `config.json` verwendet. Ein Profil ist eine vollständige, unabhängige
 Konfiguration: Kalenderquelle, Selektion, Vorlaufzeiten, Templates,
-Wochenübersicht, State-Datei und `whatsappGroups[]` gehören jeweils zum Profil.
+Wochenübersicht, State-Datei und `whatsappTargets[]` gehören jeweils zum Profil.
 Profile mit `enabled: false` werden übersprungen.
 
 Alternativ kann die Konfiguration über eine lokale Web-Oberfläche gepflegt
@@ -78,23 +88,24 @@ npm run settings
 
 Danach im Browser `http://127.0.0.1:3876` öffnen. Für einen
 [abgesicherten Zugriff aus dem lokalen Netzwerk](#sicherer-zugriff-aus-dem-lokalen-netzwerk)
-kann der Listener ausdrücklich an die private Server-IP gebunden werden. Die Oberfläche bietet
-gruppierte Einstellungen, Template-Editoren mit Vorschau, Validierung sowie
-Preview- und Dry-Run-Aktionen. Kalenderprofile lassen sich dort anlegen,
-kopieren, aktivieren oder löschen und ihre WhatsApp-Gruppen hinzufügen,
-aktivieren oder entfernen. In der Profilverwaltung lassen sich die Gruppen der
-gekoppelten WhatsApp-Session über „WhatsApp-Gruppen laden“ auslesen und
-ausgewählte Einträge doppelungsfrei ins Profil übernehmen. Außerdem kann dort
-der gespeicherte Versand-State nur für das ausgewählte Profil geleert werden,
-z. B. nach Tests mit einer Testgruppe. Live-Versand wird dort nicht ausgelöst.
+kann der Listener ausdrücklich an die private Server-IP gebunden werden. Die
+Oberfläche bietet gruppierte Einstellungen, Template-Editoren mit Vorschau,
+Validierung sowie Preview- und Dry-Run-Aktionen. Kalenderprofile lassen sich
+dort anlegen, kopieren, aktivieren oder löschen und ihre WhatsApp-Ziele
+hinzufügen, aktivieren oder entfernen. In der Profilverwaltung lassen sich die
+Gruppen der gekoppelten WhatsApp-Session über „WhatsApp-Gruppen laden“
+auslesen und ausgewählte Einträge doppelungsfrei ins Profil übernehmen.
+Außerdem kann dort der gespeicherte Versand-State nur für das ausgewählte
+Profil geleert werden, z. B. nach Tests mit einer Testgruppe. Live-Versand wird
+dort nicht ausgelöst.
 
-### Mehrere Kalender und Gruppen
+### Mehrere Kalender und WhatsApp-Ziele
 
 Die bisherigen Top-Level-Einstellungen bleiben gültig und werden als ein
 implizites Standardprofil ausgeführt. Für mehrere Kalender wird in
 `config.json` stattdessen `profiles[]` verwendet. Jedes Profil enthält seinen
 eigenen vollständigen Einstellungsstack: Quelle, Selektion, Vorlaufzeiten,
-Templates, Wochenübersicht, State-Pfad und Zielgruppen.
+Templates, Wochenübersicht, State-Pfad und WhatsApp-Ziele.
 
 ```json
 {
@@ -114,9 +125,9 @@ Templates, Wochenübersicht, State-Pfad und Zielgruppen.
       "selectCategory": "WhatsApp",
       "defaultReminders": "1d",
       "templateSingle": "Kurzer Reminder: *{titel}*\\n🗓 {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}",
-      "whatsappGroups": [
-        { "id": "120363000000000001@g.us", "name": "Eltern Klasse 3", "enabled": true },
-        { "id": "120363000000000002@g.us", "name": "Orga-Team", "enabled": true }
+      "whatsappTargets": [
+        { "type": "group", "id": "120363000000000001@g.us", "name": "Eltern Klasse 3", "enabled": true },
+        { "type": "person", "phone": "+4915112345678", "name": "Klassenleitung", "enabled": true }
       ],
       "dbPath": "./data/schule.db"
     },
@@ -128,8 +139,8 @@ Templates, Wochenübersicht, State-Pfad und Zielgruppen.
       "icsPath": "./verein.ics",
       "selectByCategory": false,
       "selectByPrefix": false,
-      "whatsappGroups": [
-        { "id": "120363000000000003@g.us", "name": "Verein", "enabled": true }
+      "whatsappTargets": [
+        { "type": "group", "id": "120363000000000003@g.us", "name": "Verein", "enabled": true }
       ],
       "dbPath": "./data/verein.db"
     }
@@ -137,11 +148,13 @@ Templates, Wochenübersicht, State-Pfad und Zielgruppen.
 }
 ```
 
-Mehrere Gruppen in einem Profil erhalten denselben gerenderten Nachrichtentext.
-Gruppenspezifische Templates oder eigene Selektionsregeln pro Gruppe sind
+Alle aktivierten Ziele in einem Profil erhalten denselben gerenderten
+Nachrichtentext. Zielspezifische Templates oder eigene Selektionsregeln sind
 bewusst nicht Teil dieser Variante; dafür ein separates Profil anlegen.
 
 Die Gruppen-ID lässt sich nach `npm run pair` aus der Gruppenliste übernehmen.
+Personen werden mit internationaler Telefonnummer gepflegt; Chatendar prüft
+vor dem Live-Versand, ob die Nummer bei WhatsApp registriert ist.
 In der Settings-Oberfläche können Profile angelegt, kopiert, aktiviert oder
 gelöscht und die Gruppen je Profil verwaltet werden. Die Oberfläche speichert
 `config.json`; die eigentliche WhatsApp-Kopplung bleibt bei `npm run pair`.
@@ -244,7 +257,9 @@ Danach listet das Skript alle Gruppen mit ihrer ID auf:
 ```
 
 Die passende ID nach `WHATSAPP_GROUP_ID` in die `.env` übernehmen oder in
-`config.json` unter `whatsappGroups[]` des jeweiligen Profils hinterlegen.
+`config.json` als Gruppenziel unter `whatsappTargets[]` des jeweiligen Profils
+hinterlegen. Einzelpersonen werden dort mit `type: "person"` und einer
+internationalen `phone`-Nummer eingetragen.
 
 > **Wichtig:** Die Session liegt in `./auth_session` und erlaubt vollen Zugriff
 > auf den gekoppelten WhatsApp-Account. Der Ordner ist in `.gitignore`
@@ -252,10 +267,14 @@ Die passende ID nach `WHATSAPP_GROUP_ID` in die `.env` übernehmen oder in
 > einmalig – solange der Ordner erhalten bleibt, ist kein weiterer QR-Code
 > nötig. Bei einem Backup den Ordner mitsichern.
 >
-> Ein Hinweis zum Risiko: Baileys nutzt das inoffizielle Multi-Device-Protokoll.
-> Das ist für normale Gruppen der einzig praktikable Weg, verstößt aber gegen
-> die WhatsApp-Nutzungsbedingungen. Ein eigener Account statt des privaten
-> Hauptaccounts ist die sicherere Wahl.
+> **Risiko:** Baileys nutzt das inoffizielle Multi-Device-Protokoll und kann
+> gegen die WhatsApp-Nutzungsbedingungen verstoßen. `baileys-antiban` reduziert
+> mit konservativen Limits und zufälligen Abständen lediglich typische
+> Automatisierungsmuster; es verhindert keine Sperre. Chatendar aktiviert keine
+> Textveränderung, Auto-Antworten, künstliche Presence, Fingerprint- oder
+> Proxy-Funktionen. Direktnachrichten nur an Personen senden, die dem Empfang
+> zugestimmt haben. Ein eigener Account statt des privaten Hauptaccounts bleibt
+> die sicherere Wahl.
 
 ### 3. Scharf schalten
 
@@ -381,8 +400,8 @@ Vorschau mit Beispieldaten.
 
 ## Wochenübersicht
 
-Zusätzlich zu den Einzel-Erinnerungen kann zu einem festen Wochentermin eine
-Liste aller Termine der kommenden Woche verschickt werden:
+Unabhängig von den Einzel- und Sammelerinnerungen kann zu einem festen
+Wochentermin eine Liste aller Termine der kommenden Woche verschickt werden:
 
 ```ini
 DIGEST_ENABLED=true
@@ -390,6 +409,17 @@ DIGEST_DAY=fr        # mo, di, mi, do, fr, sa, so (auch "Freitag" oder 0-6)
 DIGEST_TIME=18:00    # lokale Zeit in TIMEZONE
 DIGEST_RANGE=7d      # oder next-week
 ```
+
+Für **ausschließlich Wochenübersichten**:
+
+```ini
+REMINDERS_ENABLED=false
+DIGEST_ENABLED=true
+```
+
+`REMINDERS_ENABLED=false` deaktiviert Einzel- und Sammelerinnerungen gemeinsam,
+ohne die Wochenübersicht oder ihre Terminauswahl zu beeinflussen. Die Option
+kann in `config.json` je Profil als `"remindersEnabled": false` gesetzt werden.
 
 Ergebnis:
 
@@ -530,7 +560,7 @@ npm run settings
 
 Startet eine lokale Oberfläche auf `127.0.0.1:3876`. Dort lassen sich die
 üblichen Konfigurationswerte in `config.json` speichern, Profile kopieren oder
-löschen, WhatsApp-Gruppen pro Profil verwalten, Templates mit Textareas
+löschen, WhatsApp-Gruppen und Einzelpersonen pro Profil verwalten, Templates mit Textareas
 bearbeiten, die Konfiguration validieren und `--preview` bzw. `--dry-run`
 sicher ohne Live-Versand ausführen. Diese Aktionen nutzen das aktuell in der
 Sidebar ausgewählte Profil inklusive ungespeicherter Änderungen, also auch
@@ -644,7 +674,7 @@ solange der Termin noch bevorsteht.
 
 ## State und Duplikatsvermeidung
 
-Jede Kombination aus Profil-ID, Zielgruppen-ID, Termin-ID und Vorlaufzeit-Stufe
+Jede Kombination aus Profil-ID, WhatsApp-Ziel-ID, Termin-ID und Vorlaufzeit-Stufe
 wird in der SQLite-Tabelle `sent_reminders` (`DB_PATH`) festgehalten. Bei
 Serienterminen enthält die ID den Zeitpunkt der Instanz, damit jeder Termin
 einzeln gezählt wird.
@@ -652,9 +682,9 @@ einzeln gezählt wird.
 Beim ersten Start mit einer älteren State-Datenbank wird die Tabelle automatisch
 auf das neue Schema migriert. Alte Einträge werden dem Profil `default` und der
 Zielgruppe `default` zugeordnet. Dadurch bleibt die historische
-Top-Level-Konfiguration nachvollziehbar; neue Profil-/Gruppen-Kombinationen
+Top-Level-Konfiguration nachvollziehbar; neue Profil-/Ziel-Kombinationen
 haben jeweils ihren eigenen State und unterdrücken einander nicht. Profil-IDs
-und Gruppen-IDs sollten deshalb stabil bleiben.
+und Zieladressen sollten deshalb stabil bleiben.
 
 Persistiert wird erst **nach** erfolgreichem Versand. Schlägt das Senden fehl,
 bleibt die Erinnerung offen und wird beim nächsten Lauf erneut versucht.
@@ -704,6 +734,8 @@ src/
   messaging/
     templateRenderer.js   Templates füllen
     whatsappClient.js     Baileys-Wrapper
+    whatsappTarget.js     Telefonnummern und Ziel-JIDs normalisieren
+    sendGuard.js          Konservatives Rate-Limit/Jitter
   state/
     db.js                 SQLite-Zugriff
   util/
@@ -736,12 +768,13 @@ Serienterminen.
 
 ## Bekannte Grenzen
 
-- Alle aktivierten Gruppen eines Profils erhalten dieselbe gerenderte
-  Nachricht; gruppenspezifische Templates gibt es nicht
+- Alle aktivierten Ziele eines Profils erhalten dieselbe gerenderte Nachricht;
+  zielspezifische Templates gibt es nicht
 - Kein interner Scheduler – Aufruf erfolgt extern
 - Verschobene Serientermine werden nur erkannt, wenn die ursprüngliche
   Instanz im Abfragefenster liegt
-- Baileys nutzt das inoffizielle WhatsApp-Protokoll (siehe Hinweis oben)
+- Baileys nutzt das inoffizielle WhatsApp-Protokoll; auch der Sendeschutz kann
+  Sperren nicht ausschließen (siehe Hinweis oben)
 
 ## Lizenz
 
