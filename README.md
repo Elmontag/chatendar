@@ -76,7 +76,9 @@ Vorrang und eignen sich für lokale Secrets:
 npm run settings
 ```
 
-Danach im Browser `http://127.0.0.1:3876` öffnen. Die Oberfläche bietet
+Danach im Browser `http://127.0.0.1:3876` öffnen. Für einen
+[abgesicherten Zugriff aus dem lokalen Netzwerk](#sicherer-zugriff-aus-dem-lokalen-netzwerk)
+kann der Listener ausdrücklich an die private Server-IP gebunden werden. Die Oberfläche bietet
 gruppierte Einstellungen, Template-Editoren mit Vorschau, Validierung sowie
 Preview- und Dry-Run-Aktionen. Kalenderprofile lassen sich dort anlegen,
 kopieren, aktivieren oder löschen und ihre WhatsApp-Gruppen hinzufügen,
@@ -542,6 +544,81 @@ wird ein neuer QR-Code verlangt, meldet die Oberfläche das mit dem Hinweis auf
 Mit „State dieses Profils leeren“ lassen sich nur die Versandmarker des aktuell
 ausgewählten Profils entfernen; Einstellungen, Kalenderdaten und andere Profile
 bleiben unverändert.
+
+#### Sicherer Zugriff aus dem lokalen Netzwerk
+
+Ohne weitere Optionen bleibt die Oberfläche ausschließlich auf dem Server
+erreichbar. Das ist der sichere Standard:
+
+```bash
+npm run settings
+# Browser auf dem Server: http://127.0.0.1:3876
+```
+
+Für den Zugriff von einem vertrauenswürdigen Gerät im selben privaten Netz
+zuerst die private IPv4-Adresse des Servers und das lokale Netz ermitteln:
+
+```bash
+ip -br -4 addr
+ip -4 route
+```
+
+Angenommen, der Server hat `192.168.178.20` und das lokale Netz ist
+`192.168.178.0/24`. Dann den Server ausdrücklich nur an diese private Adresse
+binden:
+
+```bash
+npm run settings -- --host 192.168.178.20 --port 3876
+```
+
+Nicht ungeschützt `--host 0.0.0.0` verwenden: Das würde auf allen
+IPv4-Schnittstellen lauschen. Die konkrete private Server-IP verhindert
+bereits eine Bindung an eine eventuell vorhandene öffentliche Schnittstelle.
+Zusätzlich sollte UFW zuerst das lokale Netz erlauben und danach alle anderen
+Quellen für diesen Port sperren:
+
+```bash
+sudo ufw status verbose
+sudo ufw status numbered
+
+sudo ufw insert 1 allow proto tcp from 192.168.178.0/24 to 192.168.178.20 port 3876 comment 'chatendar settings LAN'
+sudo ufw insert 2 deny proto tcp from any to 192.168.178.20 port 3876 comment 'chatendar settings block external'
+```
+
+IP-Adresse und CIDR müssen zur eigenen Netzkonfiguration passen. Vorhandene
+breite Regeln wie `ALLOW 3876/tcp Anywhere` sollten entfernt werden; die
+Nummern dafür zeigt `sudo ufw status numbered`, gelöscht wird anschließend
+gezielt mit `sudo ufw delete <Nummer>`.
+
+Ist UFW noch inaktiv, vor `sudo ufw enable` zuerst den tatsächlichen
+SSH-Zugriff erlauben und eine zweite SSH-Sitzung zum Testen offen halten. Bei
+Standardkonfiguration ist das beispielsweise `sudo ufw allow OpenSSH`; bei
+einem abweichenden SSH-Port muss stattdessen dessen konkrete Regel gesetzt
+werden.
+
+Listener und Firewall lassen sich auf dem Server prüfen:
+
+```bash
+ss -ltnp 'sport = :3876'
+sudo ufw status numbered
+```
+
+Von einem erlaubten LAN-Gerät muss anschließend
+`http://192.168.178.20:3876` erreichbar sein. Ein Gerät außerhalb des
+erlaubten CIDR darf keine Verbindung erhalten. Am Router darf außerdem keine
+Portweiterleitung für TCP 3876 eingerichtet sein.
+
+Die Settings-App besitzt in diesem Betriebsmodell keine eigene Anmeldung.
+Jedes Gerät im erlaubten Netz kann Konfigurationen ändern, Profil-State löschen
+und Preview-/Dry-Run-Aktionen starten. Für Gast-WLAN, nicht vertrauenswürdige
+lokale Geräte oder Zugriff von unterwegs die App auf `127.0.0.1` belassen und
+stattdessen ein VPN oder einen authentifizierten Reverse Proxy verwenden.
+
+Die verfügbaren Startoptionen zeigt:
+
+```bash
+npm run settings -- --help
+```
 
 ## Wie die Fälligkeit bestimmt wird
 

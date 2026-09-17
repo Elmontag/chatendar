@@ -1425,17 +1425,93 @@ export function createSettingsServer({
   });
 }
 
+export const SETTINGS_USAGE = `
+chatendar Einstellungen
+
+Aufruf:
+  npm run settings -- [Optionen]
+
+Optionen:
+  --host <Adresse>  Listener-Adresse (Default: 127.0.0.1)
+  --port <Port>     Listener-Port (Default: 3876)
+  --help, -h        Diese Hilfe
+
+Beispiel für ein privates LAN:
+  npm run settings -- --host 192.168.1.50 --port 3876
+
+Eine LAN-Bindung muss zusätzlich per Firewall auf das vertrauenswürdige
+lokale Netz beschränkt werden.
+`.trim();
+
+export function parseSettingsServerArgs(argv) {
+  const result = { host: '127.0.0.1', port: 3876, help: false };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const separator = arg.indexOf('=');
+    const flag = separator === -1 ? arg : arg.slice(0, separator);
+    const inlineValue = separator === -1 ? null : arg.slice(separator + 1);
+    const nextValue = () => {
+      if (inlineValue !== null) return inlineValue;
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('-')) {
+        throw new Error(`Option ${flag} erwartet einen Wert`);
+      }
+      i += 1;
+      return value;
+    };
+
+    switch (flag) {
+      case '--host': {
+        const value = nextValue().trim();
+        if (!value) throw new Error('--host erwartet eine nicht leere Adresse');
+        result.host = value;
+        break;
+      }
+      case '--port': {
+        const value = nextValue();
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`--port erwartet eine ganze Zahl zwischen 1 und 65535 (ist: "${value}")`);
+        }
+        const port = Number.parseInt(value, 10);
+        if (port < 1 || port > 65535) {
+          throw new Error(`--port erwartet eine ganze Zahl zwischen 1 und 65535 (ist: "${value}")`);
+        }
+        result.port = port;
+        break;
+      }
+      case '--help':
+      case '-h':
+        result.help = true;
+        break;
+      default:
+        throw new Error(`Unbekannte Option: ${arg}\n\n${SETTINGS_USAGE}`);
+    }
+  }
+
+  return result;
+}
+
 export function startSettingsServer({ host = '127.0.0.1', port = 3876, cwd = ROOT } = {}) {
   const server = createSettingsServer({ cwd });
   server.listen(port, host, () => {
     const address = server.address();
-    console.log(`chatendar Einstellungen: http://${address.address}:${address.port}`);
+    const displayAddress = address.family === 'IPv6' ? `[${address.address}]` : address.address;
+    console.log(`chatendar Einstellungen: http://${displayAddress}:${address.port}`);
   });
   return server;
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
-  const portArg = process.argv.find((arg) => arg.startsWith('--port='));
-  const port = portArg ? Number.parseInt(portArg.slice('--port='.length), 10) : 3876;
-  startSettingsServer({ port: Number.isFinite(port) ? port : 3876 });
+  try {
+    const options = parseSettingsServerArgs(process.argv.slice(2));
+    if (options.help) {
+      console.log(SETTINGS_USAGE);
+    } else {
+      startSettingsServer(options);
+    }
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }

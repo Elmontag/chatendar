@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { createSettingsServer } from '../src/settings/server.js';
+import {
+  createSettingsServer,
+  parseSettingsServerArgs,
+  SETTINGS_USAGE,
+  startSettingsServer,
+} from '../src/settings/server.js';
 import { openDatabase, SENT_STATUS } from '../src/state/db.js';
 import { buildReminders } from '../src/reminders/scheduler.js';
 import { FIXTURES } from './helpers.js';
@@ -34,6 +39,72 @@ async function request(pathname, body) {
   const payload = await response.json();
   return { response, payload };
 }
+
+describe('Settings server arguments', () => {
+  it('verwendet standardmäßig ausschließlich den lokalen Listener', () => {
+    assert.deepEqual(parseSettingsServerArgs([]), {
+      host: '127.0.0.1',
+      port: 3876,
+      help: false,
+    });
+  });
+
+  it('akzeptiert Host und Port getrennt oder mit Gleichheitszeichen', () => {
+    assert.deepEqual(parseSettingsServerArgs(['--host', '192.168.1.50', '--port', '43876']), {
+      host: '192.168.1.50',
+      port: 43876,
+      help: false,
+    });
+    assert.deepEqual(parseSettingsServerArgs(['--host=192.168.178.20', '--port=3877']), {
+      host: '192.168.178.20',
+      port: 3877,
+      help: false,
+    });
+  });
+
+  it('lehnt fehlende, ungültige und unbekannte Argumente ab', () => {
+    assert.throws(() => parseSettingsServerArgs(['--host']), /--host.*erwartet einen Wert/);
+    assert.throws(() => parseSettingsServerArgs(['--host', '-h']), /--host.*erwartet einen Wert/);
+    assert.throws(() => parseSettingsServerArgs(['--host=']), /nicht leere Adresse/);
+    assert.throws(() => parseSettingsServerArgs(['--port', 'abc']), /zwischen 1 und 65535/);
+    assert.throws(() => parseSettingsServerArgs(['--port=0']), /zwischen 1 und 65535/);
+    assert.throws(() => parseSettingsServerArgs(['--port=65536']), /zwischen 1 und 65535/);
+    assert.throws(() => parseSettingsServerArgs(['--public']), /Unbekannte Option/);
+  });
+
+  it('stellt eine Hilfe bereit, ohne die sicheren Defaults zu verändern', () => {
+    assert.deepEqual(parseSettingsServerArgs(['--help']), {
+      host: '127.0.0.1',
+      port: 3876,
+      help: true,
+    });
+    assert.match(SETTINGS_USAGE, /--host <Adresse>/);
+    assert.match(SETTINGS_USAGE, /Default: 127\.0\.0\.1/);
+    assert.match(SETTINGS_USAGE, /Firewall/);
+  });
+
+  it('bindet den Server an die explizit übergebene Adresse', async () => {
+    const instance = startSettingsServer({
+      host: '127.0.0.1',
+      port: 0,
+      cwd: tempDir(),
+    });
+    if (!instance.listening) {
+      await new Promise((resolve, reject) => {
+        instance.once('listening', resolve);
+        instance.once('error', reject);
+      });
+    }
+
+    try {
+      const address = instance.address();
+      assert.equal(address.address, '127.0.0.1');
+      assert.ok(address.port > 0);
+    } finally {
+      await new Promise((resolve) => instance.close(resolve));
+    }
+  });
+});
 
 after(async () => {
   if (server) {
