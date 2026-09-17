@@ -95,7 +95,7 @@ function displayFormatter(key, locale, options) {
  *
  * @param {Date} date
  * @param {{timezone: string, locale: string}} config
- * @returns {{datum: string, datumKurz: string, wochentag: string, uhrzeit: string}}
+ * @returns {{datum: string, datumKurz: string, datumMitWochentag: string, datumMitWochentagKurz: string, wochentag: string, wochentagKurz: string, uhrzeit: string}}
  */
 export function formatForMessage(date, { timezone, locale }) {
   const datum = displayFormatter(`full:${locale}:${timezone}`, locale, {
@@ -118,13 +118,27 @@ export function formatForMessage(date, { timezone, locale }) {
     weekday: 'long',
   }).format(date);
 
+  const intlWochentagKurz = displayFormatter(`weekday-short:${locale}:${timezone}`, locale, {
+    timeZone: timezone,
+    weekday: 'short',
+  }).format(date);
+  const wochentagKurz = datum.includes(',') ? datum.split(',')[0] : intlWochentagKurz;
+
   const uhrzeit = displayFormatter(`time:${locale}:${timezone}`, locale, {
     timeZone: timezone,
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
 
-  return { datum, datumKurz, wochentag, uhrzeit };
+  return {
+    datum,
+    datumKurz,
+    datumMitWochentag: `${wochentag}, ${datumKurz}`,
+    datumMitWochentagKurz: `${wochentagKurz}, ${datumKurz}`,
+    wochentag,
+    wochentagKurz,
+    uhrzeit,
+  };
 }
 
 /** Kompakte ISO-ähnliche Ausgabe in lokaler Zeitzone – nur für Logs. */

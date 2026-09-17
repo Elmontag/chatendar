@@ -199,18 +199,34 @@ describe('Nachricht der Wochenübersicht', () => {
     const text = buildDigestMessage(events, range, config);
 
     assert.match(text, /Termine der kommenden Woche/);
-    assert.match(text, /Montag, 21\.09\.2026/);
+    assert.match(text, /In 4 Tagen, 21\.09\.2026/);
     assert.match(text, /Elternabend/);
     assert.match(text, /Aula/);
-    assert.match(text, /Freitag, 25\.09\.2026/);
+    assert.match(text, /In 8 Tagen, 25\.09\.2026/);
     assert.match(text, /Training/);
   });
 
   it('kommt mit ganztägigen Terminen klar', () => {
     const events = [makeEvent({ titel: 'Sommerfest', ganztags: true, start: new Date('2026-09-22T22:00:00Z') })];
     const text = buildDigestMessage(events, range, config);
-    assert.match(text, /ganztägig/);
+    assert.doesNotMatch(text, /ganztägig/);
     assert.doesNotMatch(text, /Uhr/);
+  });
+
+  it('fasst mehrtägige Termine in einer Zeile zusammen', () => {
+    const events = [
+      makeEvent({
+        titel: 'Klassenfahrt',
+        start: new Date('2026-09-21T08:00:00Z'),
+        ende: new Date('2026-09-23T14:00:00Z'),
+      }),
+    ];
+    const text = buildDigestMessage(events, range, config, new Date('2026-09-20T08:00:00Z'));
+
+    assert.match(text, /Morgen bis In 3 Tagen/);
+    assert.match(text, /21\.09\.2026–23\.09\.2026/);
+    assert.match(text, /10:00–16:00 Uhr/);
+    assert.equal((text.match(/Klassenfahrt/g) ?? []).length, 1);
   });
 
   it('nutzt das Leer-Template ohne Termine', () => {

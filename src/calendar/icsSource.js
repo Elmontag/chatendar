@@ -6,8 +6,8 @@
  *    (aus X-WA-REMIND wird der Key WA-REMIND). Wir legen beide Schreibweisen ab.
  *  - Serientermine (RRULE) werden auf einzelne Instanzen im Abfragefenster
  *    expandiert, inklusive EXDATE-Ausnahmen und RECURRENCE-ID-Overrides.
- *  - Ganztägige Termine liefert node-ical als Mitternacht UTC; gemeint ist
- *    Mitternacht in der konfigurierten Zeitzone.
+ *  - Ganztägige Termine liefert node-ical je nach Version bereits als lokalen
+ *    Date-only-Zeitpunkt oder als Mitternacht UTC; beides wird normalisiert.
  */
 
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import ical from 'node-ical';
 
 import { createEvent } from './calendarSource.js';
-import { localMidnightForUtcDate } from '../util/datetime.js';
+import { localMidnightForUtcDate, zonedTimeToInstant } from '../util/datetime.js';
 import { log } from '../logger.js';
 
 /** Keys, die node-ical für Custom-Properties vergibt: GROSSBUCHSTABEN mit Bindestrichen. */
@@ -57,7 +57,23 @@ function collectCategories(component) {
 /** Ganztägige Termine auf lokale Mitternacht umrechnen. */
 function normalizeStart(date, isAllDay, timezone) {
   if (!isAllDay) return date;
+  if (date.dateOnly || date.tz?.dateOnly) return date;
   return localMidnightForUtcDate(date, timezone);
+}
+
+/** RRULE-Occurrences von node-ical enthalten die lokale Wanduhrzeit in UTC-Feldern. */
+function normalizeOccurrence(occurrence, timezone) {
+  return zonedTimeToInstant(
+    {
+      year: occurrence.getUTCFullYear(),
+      month: occurrence.getUTCMonth() + 1,
+      day: occurrence.getUTCDate(),
+      hour: occurrence.getUTCHours(),
+      minute: occurrence.getUTCMinutes(),
+      second: occurrence.getUTCSeconds(),
+    },
+    timezone,
+  );
 }
 
 /** Interner Termin aus einem VEVENT (bzw. einer Serieninstanz). */
@@ -101,6 +117,7 @@ function expandRecurrence(component, { from, to, timezone }) {
   for (const occurrence of occurrences) {
     // node-ical schlüsselt EXDATE/RECURRENCE-ID über das UTC-Datum (YYYY-MM-DD).
     const key = occurrence.toISOString().slice(0, 10);
+    const start = normalizeOccurrence(occurrence, timezone);
 
     if (component.exdate && component.exdate[key]) continue; // Ausnahme: findet nicht statt
 
@@ -122,8 +139,8 @@ function expandRecurrence(component, { from, to, timezone }) {
     events.push(
       toEvent(component, {
         id: `${component.uid}#${occurrence.toISOString()}`,
-        start: occurrence,
-        end: durationMs > 0 ? new Date(occurrence.getTime() + durationMs) : null,
+        start,
+        end: durationMs > 0 ? new Date(start.getTime() + durationMs) : null,
         serie: true,
         timezone,
       }),
@@ -139,20 +156,8 @@ function expandRecurrence(component, { from, to, timezone }) {
  * @param {{from: Date, to: Date}} range
  * @returns {Promise<Array<object>>}
  */
-export async function fetchEvents(config, { from, to }) {
-  const { icsPath, timezone } = config;
-
-  if (!fs.existsSync(icsPath)) {
-    throw new Error(`ICS-Datei nicht gefunden: ${icsPath} (Config: ICS_PATH)`);
-  }
-
-  let parsed;
-  try {
-    parsed = await ical.async.parseFile(icsPath);
-  } catch (error) {
-    throw new Error(`ICS-Datei konnte nicht geparst werden (${icsPath}): ${error.message}`);
-  }
-
+export function eventsFromParsedCalendar(parsed, config, { from, to }, label = 'Kalender') {
+  const { timezone } = config;
   const events = [];
   let recurringCount = 0;
 
@@ -182,7 +187,32 @@ export async function fetchEvents(config, { from, to }) {
   }
 
   log.debug(
-    `ICS gelesen: ${icsPath} – ${events.length} Termin(e) im Fenster, davon aus ${recurringCount} Serie(n) expandiert`,
+    `ICS gelesen: ${label} – ${events.length} Termin(e) im Fenster, davon aus ${recurringCount} Serie(n) expandiert`,
   );
   return events;
+}
+
+export async function parseIcsString(data, label = 'ICS-Daten') {
+  try {
+    return await ical.async.parseICS(data);
+  } catch (error) {
+    throw new Error(`ICS-Daten konnten nicht geparst werden (${label}): ${error.message}`);
+  }
+}
+
+export async function fetchEvents(config, { from, to }) {
+  const { icsPath } = config;
+
+  if (!fs.existsSync(icsPath)) {
+    throw new Error(`ICS-Datei nicht gefunden: ${icsPath} (Config: ICS_PATH)`);
+  }
+
+  let parsed;
+  try {
+    parsed = await ical.async.parseFile(icsPath);
+  } catch (error) {
+    throw new Error(`ICS-Datei konnte nicht geparst werden (${icsPath}): ${error.message}`);
+  }
+
+  return eventsFromParsedCalendar(parsed, config, { from, to }, icsPath);
 }

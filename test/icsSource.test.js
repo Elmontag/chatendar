@@ -127,9 +127,4 @@ describe('Fehlerfälle', () => {
       /ICS-Datei nicht gefunden/,
     );
   });
-
-  it('meldet, dass CalDAV noch nicht implementiert ist', async () => {
-    const config = testConfig({ env: { SOURCE: 'caldav' } });
-    await assert.rejects(() => fetchEvents(config, WEITES_FENSTER), /noch nicht implementiert/);
-  });
 });

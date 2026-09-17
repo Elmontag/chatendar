@@ -4,6 +4,7 @@ node_modules/
 # Konfiguration mit Zugangsdaten
 .env
 config.json
+calendar.ics
 
 # WhatsApp-Session – enthält vollen Zugriff auf den gekoppelten Account!
 auth_session/
