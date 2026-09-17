@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
+import Database from 'better-sqlite3';
+
 import { openDatabase, SENT_STATUS } from '../src/state/db.js';
 import { buildReminders } from '../src/reminders/scheduler.js';
 import { makeEvent, testConfig } from './helpers.js';
@@ -47,6 +49,33 @@ describe('State-Datenbank', () => {
     db.close();
   });
 
+  it('trennt denselben Termin nach Profil und Zielgruppe', () => {
+    const db = tempDb();
+    const [reminder] = buildReminders(makeEvent({ id: 'event-1' }), config);
+
+    db.markProcessed(reminder, SENT_STATUS.SENT, new Date(), { profileId: 'schule', targetId: 'gruppe-a' });
+
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'schule', targetId: 'gruppe-a' }), true);
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'schule', targetId: 'gruppe-b' }), false);
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'verein', targetId: 'gruppe-a' }), false);
+    db.close();
+  });
+
+  it('löscht State gezielt für ein Profil', () => {
+    const db = tempDb();
+    const [reminder] = buildReminders(makeEvent({ id: 'event-1' }), config);
+
+    db.markProcessed(reminder, SENT_STATUS.SENT, new Date(), { profileId: 'schule', targetId: 'gruppe-a' });
+    db.markProcessed(reminder, SENT_STATUS.SENT, new Date(), { profileId: 'schule', targetId: 'gruppe-b' });
+    db.markProcessed(reminder, SENT_STATUS.SENT, new Date(), { profileId: 'verein', targetId: 'gruppe-a' });
+
+    assert.equal(db.clearProfile('schule'), 2);
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'schule', targetId: 'gruppe-a' }), false);
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'schule', targetId: 'gruppe-b' }), false);
+    assert.equal(db.isSent('event-1', reminder.offsetMinutes, { profileId: 'verein', targetId: 'gruppe-a' }), true);
+    db.close();
+  });
+
   it('ist idempotent – doppeltes Vermerken wirft nicht', () => {
     const db = tempDb();
     const [reminder] = buildReminders(makeEvent(), config);
@@ -82,6 +111,35 @@ describe('State-Datenbank', () => {
     const zweite = openDatabase(dbPath);
     assert.equal(zweite.isSent('event-1', reminder.offsetMinutes), true);
     zweite.close();
+  });
+
+  it('migriert alte State-Datenbanken auf Profil- und Zielgruppen-Scope', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-test-'));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, 'state.db');
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE sent_reminders (
+        event_id TEXT NOT NULL,
+        offset_minutes INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        event_title TEXT,
+        event_start TEXT,
+        send_at TEXT,
+        processed_at TEXT NOT NULL,
+        PRIMARY KEY (event_id, offset_minutes)
+      );
+      INSERT INTO sent_reminders
+        (event_id, offset_minutes, status, event_title, event_start, send_at, processed_at)
+      VALUES
+        ('legacy-event', 1440, 'sent', 'Alt', '2026-01-01T00:00:00.000Z', '2025-12-31T00:00:00.000Z', '2025-12-31T00:00:00.000Z');
+    `);
+    legacy.close();
+
+    const db = openDatabase(dbPath);
+    assert.equal(db.isSent('legacy-event', 1440), true);
+    assert.equal(db.isSent('legacy-event', 1440, { profileId: 'anderes', targetId: 'default' }), false);
+    db.close();
   });
 
   it('räumt alte Einträge auf', () => {

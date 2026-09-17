@@ -2,13 +2,23 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 
-import { loadConfig } from '../src/config.js';
+import fs from 'node:fs';
+import os from 'node:os';
+
+import { loadConfig, loadRuntimeConfig } from '../src/config.js';
 import { FIXTURES, REPO_ROOT, testConfig } from './helpers.js';
 
 const KEINE_CONFIG = path.join(FIXTURES, 'keine-config.json');
 
 function lade(env = {}) {
   return loadConfig({ configFile: KEINE_CONFIG, env, cwd: REPO_ROOT });
+}
+
+function writeTempConfig(config) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-config-test-'));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return { dir, file };
 }
 
 describe('Konfiguration', () => {
@@ -66,11 +76,91 @@ describe('Konfiguration', () => {
     });
     assert.equal(config.defaultReminders, '1h');
   });
+
+  it('normalisiert legacy config als Standardprofil', () => {
+    const runtime = loadRuntimeConfig({ configFile: KEINE_CONFIG, env: { WHATSAPP_GROUP_ID: '120363000000000000@g.us' }, cwd: REPO_ROOT });
+    assert.equal(runtime.enabledProfiles.length, 1);
+    assert.equal(runtime.enabledProfiles[0].profileId, 'default');
+    assert.equal(runtime.enabledProfiles[0].whatsappGroups[0].id, '120363000000000000@g.us');
+  });
+
+  it('leitet whatsappGroupId (Legacy) aus der ersten aktiven Gruppe eines Profils ab', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [{
+        id: 'schule',
+        name: 'Schule',
+        dryRun: true,
+        whatsappGroups: [
+          { id: '120363000000000001@g.us', name: 'Deaktiviert', enabled: false },
+          { id: '120363000000000002@g.us', name: 'Aktiv', enabled: true },
+        ],
+      }],
+    });
+    try {
+      const runtime = loadRuntimeConfig({ configFile: file, env: {}, cwd: dir });
+      assert.equal(runtime.profiles[0].whatsappGroupId, '120363000000000002@g.us');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('liest mehrere Profile mit eigenen vollständigen Einstellungen', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [
+        {
+          id: 'schule',
+          name: 'Schule',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          whatsappGroups: [
+            { id: '120363000000000001@g.us', name: 'Klasse 3' },
+            { id: '120363000000000002@g.us', name: 'Orga' },
+          ],
+        },
+        {
+          id: 'verein',
+          name: 'Verein',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'edge-cases.ics'),
+          selectByCategory: false,
+          selectByPrefix: false,
+          enabled: false,
+          whatsappGroups: ['120363000000000003@g.us'],
+        },
+      ],
+    });
+    try {
+      const runtime = loadRuntimeConfig({ configFile: file, env: {}, cwd: dir });
+      assert.equal(runtime.profiles.length, 2);
+      assert.equal(runtime.enabledProfiles.length, 1);
+      assert.equal(runtime.profiles[0].profileId, 'schule');
+      assert.equal(runtime.profiles[0].defaultReminders, '1d');
+      assert.equal(runtime.profiles[0].whatsappGroups.length, 2);
+      assert.equal(runtime.profiles[1].selectByCategory, false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Validierung', () => {
   it('lehnt eine unbekannte Quelle ab', () => {
     assert.throws(() => lade({ SOURCE: 'google' }), /SOURCE muss "file" oder "caldav" sein/);
+  });
+
+  it('verlangt CalDAV-Zugangsdaten nur für SOURCE=caldav', () => {
+    assert.doesNotThrow(() => lade({ SOURCE: 'file' }));
+    assert.throws(() => lade({ SOURCE: 'caldav' }), /CALDAV_URL muss gesetzt sein/);
+    assert.doesNotThrow(() =>
+      lade({
+        SOURCE: 'caldav',
+        CALDAV_URL: 'https://cloud.example.test/remote.php/dav',
+        CALDAV_USERNAME: 'user',
+        CALDAV_PASSWORD: 'secret',
+        CALDAV_CALENDAR: 'Familie',
+      }),
+    );
   });
 
   it('erlaubt das Abschalten beider Selektionswege (= kein Filter)', () => {
@@ -108,6 +198,123 @@ describe('Validierung', () => {
     } catch (error) {
       assert.match(error.message, /SOURCE muss/);
       assert.match(error.message, /DEFAULT_REMINDERS/);
+    }
+  });
+
+  it('lehnt doppelte Profil-IDs ab', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [
+        { id: 'schule', icsPath: path.join(FIXTURES, 'beispiel.ics') },
+        { id: 'schule', icsPath: path.join(FIXTURES, 'beispiel.ics') },
+      ],
+    });
+    try {
+      assert.throws(() => loadRuntimeConfig({ configFile: file, env: {}, cwd: dir }), /Profil-ID "schule" ist doppelt/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lehnt unsichere Profil-IDs ab, statt sie still umzuschreiben', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [{ id: 'schule/ferien', icsPath: path.join(FIXTURES, 'beispiel.ics') }],
+    });
+    try {
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: file, env: {}, cwd: dir }),
+        /Profil-ID "schule\/ferien" darf nur Buchstaben/,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verlangt ein aktiviertes Profil und eindeutige Gruppen-IDs', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [
+        {
+          id: 'schule',
+          enabled: false,
+          whatsappGroups: ['120363000000000001@g.us', '120363000000000001@g.us'],
+        },
+      ],
+    });
+    try {
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: file, env: {}, cwd: dir }),
+        /WhatsApp-Gruppen-ID .* doppelt.*Mindestens ein Profil muss aktiviert sein/s,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validiert aktive Gruppen im Live-Modus', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [
+        {
+          id: 'schule',
+          dryRun: false,
+          whatsappGroups: [{ id: 'keine-gueltige-gruppe', enabled: true }],
+        },
+      ],
+    });
+    try {
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: file, env: {}, cwd: dir }),
+        /muss auf "@g\.us" enden/,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignoriert leere Gruppenplatzhalter im Dry-Run', () => {
+    const { dir, file } = writeTempConfig({
+      profiles: [{
+        id: 'schule',
+        name: 'Schule',
+        dryRun: true,
+        whatsappGroups: [{ id: '', name: '', enabled: true }],
+      }],
+    });
+    try {
+      const runtime = loadRuntimeConfig({ configFile: file, env: {}, cwd: dir });
+      assert.deepEqual(runtime.profiles[0].whatsappGroups, []);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lehnt leere oder ungültige Gruppen im Live-Modus weiterhin ab', () => {
+    const empty = writeTempConfig({
+      profiles: [{
+        id: 'schule',
+        name: 'Schule',
+        dryRun: false,
+        whatsappGroups: [{ id: '', name: '', enabled: true }],
+      }],
+    });
+    const invalid = writeTempConfig({
+      profiles: [{
+        id: 'verein',
+        name: 'Verein',
+        dryRun: false,
+        whatsappGroups: [{ id: 'keine-gruppe', name: 'Orga', enabled: true }],
+      }],
+    });
+    try {
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: empty.file, env: {}, cwd: empty.dir }),
+        /WHATSAPP_GROUP_ID muss gesetzt sein|braucht im Live-Modus mindestens eine aktive WhatsApp-Gruppe/,
+      );
+      assert.throws(
+        () => loadRuntimeConfig({ configFile: invalid.file, env: {}, cwd: invalid.dir }),
+        /muss auf "@g\.us" enden/,
+      );
+    } finally {
+      fs.rmSync(empty.dir, { recursive: true, force: true });
+      fs.rmSync(invalid.dir, { recursive: true, force: true });
     }
   });
 });

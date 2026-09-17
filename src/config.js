@@ -47,10 +47,10 @@ const DEFAULTS = {
 
   // Templates (\n in .env wird zu echten Zeilenumbrüchen)
   templateSingle:
-    '🔔 *Erinnerung* ({vorlauf} vorher)\n\n*{titel}*\n🗓 {datum}{?uhrzeit}, {uhrzeit} Uhr{/uhrzeit}{?ganztag} (ganztägig){/ganztag}{?ort}\n📍 {ort}{/ort}',
-  templateCollection: '🔔 *Erinnerung* ({vorlauf} vorher) – {anzahl} Termine:\n\n{items}',
+    'Kurzer Reminder ({vorlauf} vorher): *{titel}*\n🗓 {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}{?ort}\n📍 {ort}{/ort}\n\nKommt gut hin 🙂',
+  templateCollection: 'Kurzer Reminder: {anzahl} Termine: {vorlauf} vorher\n\n{items}',
   templateCollectionItem:
-    '• *{titel}*\n  🗓 {datum}{?uhrzeit}, {uhrzeit} Uhr{/uhrzeit}{?ganztag} (ganztägig){/ganztag}{?ort}\n  📍 {ort}{/ort}',
+    '• {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}: *{titel}*{?ort}\n  📍 {ort}{/ort}',
   collectionSeparator: '\n\n',
 
   // Wochenübersicht
@@ -59,10 +59,10 @@ const DEFAULTS = {
   digestTime: '18:00',
   digestRange: '7d',
   digestSendWhenEmpty: false,
-  templateDigest: '🗓 *Termine der kommenden Woche* ({zeitraum})\n\n{items}',
+  templateDigest: 'Hier kommt der kurze Blick auf die Termine der kommenden Woche ({zeitraum}):\n\n{items}',
   templateDigestItem:
-    '• *{wochentag}, {datum_kurz}*{?uhrzeit} – {uhrzeit} Uhr{/uhrzeit}{?ganztag} – ganztägig{/ganztag}\n  {titel}{?ort} (📍 {ort}){/ort}',
-  templateDigestEmpty: '🗓 *Termine der kommenden Woche* ({zeitraum})\n\nKeine Termine.',
+    '• {tagesbereich_relativ}, {datumsbereich}{?termin_zeit} um {termin_zeit}{/termin_zeit}: *{titel}*{?ort} (📍 {ort}){/ort}',
+  templateDigestEmpty: 'Keine Termine für {zeitraum} im Kalender. Sieht entspannt aus 🙂',
   digestSeparator: '\n',
 
   // WhatsApp
@@ -111,19 +111,7 @@ function pick(...candidates) {
   return undefined;
 }
 
-/**
- * Konfiguration laden.
- *
- * @param {object} [options]
- * @param {string} [options.configFile] Pfad zu einer config.json
- * @param {object} [options.overrides]  CLI-Overrides (bereits typisiert)
- * @param {object} [options.env]        Environment (Default: process.env)
- * @param {string} [options.cwd]        Basisverzeichnis für relative Pfade
- */
-export function loadConfig({ configFile, overrides = {}, env = process.env, cwd = process.cwd() } = {}) {
-  // .env einlesen, ohne bereits gesetzte Prozess-Variablen zu überschreiben.
-  dotenv.config({ path: path.resolve(cwd, '.env'), quiet: true });
-
+function readConfigFile({ configFile, env, cwd }) {
   const filePath = configFile ?? env.CONFIG_FILE ?? path.resolve(cwd, 'config.json');
   let fileConfig = {};
   if (fs.existsSync(filePath)) {
@@ -133,8 +121,39 @@ export function loadConfig({ configFile, overrides = {}, env = process.env, cwd 
       throw new Error(`config.json konnte nicht gelesen werden (${filePath}): ${error.message}`);
     }
   }
+  return { filePath, fileConfig };
+}
 
-  const f = fileConfig;
+function normalizeGroup(group, fallbackName = '') {
+  if (typeof group === 'string') {
+    return { id: group, name: fallbackName || group, enabled: true };
+  }
+  return {
+    id: String(group?.id ?? ''),
+    name: String(group?.name ?? group?.id ?? fallbackName ?? ''),
+    enabled: toBool(group?.enabled, true),
+  };
+}
+
+function normalizeGroups(value, legacyGroupId) {
+  const groups = Array.isArray(value)
+    ? value
+      .filter((group) => {
+        if (typeof group === 'string') return group.trim() !== '';
+        return String(group?.id ?? '').trim() !== '' || String(group?.name ?? '').trim() !== '';
+      })
+      .map((group, index) => normalizeGroup(group, `Gruppe ${index + 1}`))
+    : [];
+  if (groups.length > 0) return groups;
+  return legacyGroupId ? [normalizeGroup({ id: legacyGroupId, name: 'WhatsApp-Gruppe' })] : [];
+}
+
+function profileId(value, fallback = '') {
+  const raw = String(value ?? '').trim();
+  return raw || fallback;
+}
+
+function buildResolvedConfig(f, env, overrides, cwd, filePath) {
   const resolved = {
     source: String(pick(env.SOURCE, f.source, DEFAULTS.source)).toLowerCase(),
     icsPath: pick(env.ICS_PATH, f.icsPath, DEFAULTS.icsPath),
@@ -186,6 +205,7 @@ export function loadConfig({ configFile, overrides = {}, env = process.env, cwd 
     digestSeparator: unescape(pick(env.DIGEST_SEPARATOR, f.digestSeparator) ?? DEFAULTS.digestSeparator),
 
     whatsappGroupId: pick(env.WHATSAPP_GROUP_ID, f.whatsappGroupId, DEFAULTS.whatsappGroupId) ?? '',
+    whatsappGroups: normalizeGroups(f.whatsappGroups, pick(env.WHATSAPP_GROUP_ID, f.whatsappGroupId, '')),
     authDir: pick(env.AUTH_DIR, f.authDir, DEFAULTS.authDir),
     dryRun: toBool(pick(env.DRY_RUN, f.dryRun), DEFAULTS.dryRun),
     recordDryRun: toBool(pick(env.RECORD_DRY_RUN, f.recordDryRun), DEFAULTS.recordDryRun),
@@ -200,14 +220,71 @@ export function loadConfig({ configFile, overrides = {}, env = process.env, cwd 
     ...overrides,
   };
 
-  // Relative Pfade gegen das Arbeitsverzeichnis auflösen.
+  if (resolved.whatsappGroups.length === 0 && resolved.whatsappGroupId) {
+    resolved.whatsappGroups = normalizeGroups(null, resolved.whatsappGroupId);
+  }
+  if (!resolved.whatsappGroupId && resolved.whatsappGroups.length > 0) {
+    resolved.whatsappGroupId = resolved.whatsappGroups.find((group) => group.enabled)?.id ?? resolved.whatsappGroups[0].id;
+  }
+
   resolved.icsPath = path.resolve(cwd, resolved.icsPath);
   resolved.authDir = path.resolve(cwd, resolved.authDir);
   resolved.dbPath = path.resolve(cwd, resolved.dbPath);
   resolved.configFile = fs.existsSync(filePath) ? filePath : null;
+  return resolved;
+}
+
+/**
+ * Konfiguration laden.
+ *
+ * @param {object} [options]
+ * @param {string} [options.configFile] Pfad zu einer config.json
+ * @param {object} [options.overrides]  CLI-Overrides (bereits typisiert)
+ * @param {object} [options.env]        Environment (Default: process.env)
+ * @param {string} [options.cwd]        Basisverzeichnis für relative Pfade
+ */
+export function loadConfig({ configFile, overrides = {}, env = process.env, cwd = process.cwd() } = {}) {
+  // .env einlesen, ohne bereits gesetzte Prozess-Variablen zu überschreiben.
+  dotenv.config({ path: path.resolve(cwd, '.env'), quiet: true });
+
+  const { filePath, fileConfig } = readConfigFile({ configFile, env, cwd });
+  const resolved = buildResolvedConfig(fileConfig, env, overrides, cwd, filePath);
 
   validate(resolved);
   return resolved;
+}
+
+export function loadRuntimeConfig({ configFile, overrides = {}, env = process.env, cwd = process.cwd() } = {}) {
+  dotenv.config({ path: path.resolve(cwd, '.env'), quiet: true });
+  const { filePath, fileConfig } = readConfigFile({ configFile, env, cwd });
+  const root = buildResolvedConfig(fileConfig, env, overrides, cwd, filePath);
+  const explicitProfiles = Array.isArray(fileConfig.profiles) ? fileConfig.profiles : null;
+  const profiles = explicitProfiles
+    ? explicitProfiles.map((profile, index) => {
+      const merged = buildResolvedConfig(profile, {}, overrides, cwd, filePath);
+      merged.profileId = profileId(profile.id, `profile-${index + 1}`);
+      merged.profileName = String(profile.name ?? merged.profileId);
+      merged.enabled = toBool(profile.enabled, true);
+      merged.whatsappGroups = normalizeGroups(profile.whatsappGroups, profile.whatsappGroupId ?? '');
+      merged.whatsappGroupId = merged.whatsappGroups.find((group) => group.enabled)?.id ?? merged.whatsappGroups[0]?.id ?? '';
+      validate(merged);
+      return merged;
+    })
+    : [{
+      ...root,
+      profileId: 'default',
+      profileName: 'Standard',
+      enabled: true,
+      whatsappGroups: normalizeGroups(root.whatsappGroups, root.whatsappGroupId),
+    }];
+
+  const runtime = {
+    ...root,
+    profiles,
+    enabledProfiles: profiles.filter((profile) => profile.enabled),
+  };
+  validateRuntimeConfig(runtime);
+  return runtime;
 }
 
 /** Konfiguration prüfen – lieber früh und laut scheitern als still falsch senden. */
@@ -219,6 +296,12 @@ export function validate(config) {
   }
   if (config.source === 'file' && !config.icsPath) {
     errors.push('ICS_PATH muss gesetzt sein, wenn SOURCE=file');
+  }
+  if (config.source === 'caldav') {
+    if (!config.caldav?.url) errors.push('CALDAV_URL muss gesetzt sein, wenn SOURCE=caldav');
+    if (!config.caldav?.username) errors.push('CALDAV_USERNAME muss gesetzt sein, wenn SOURCE=caldav');
+    if (!config.caldav?.password) errors.push('CALDAV_PASSWORD muss gesetzt sein, wenn SOURCE=caldav');
+    if (!config.caldav?.calendar) errors.push('CALDAV_CALENDAR muss gesetzt sein, wenn SOURCE=caldav');
   }
   if (config.selectByCategory && !config.selectCategory) {
     errors.push('SELECT_CATEGORY muss gesetzt sein, wenn SELECT_BY_CATEGORY=true');
@@ -289,6 +372,50 @@ export function validate(config) {
     throw new Error(`Konfigurationsfehler:\n  - ${errors.join('\n  - ')}`);
   }
   return config;
+}
+
+export function validateRuntimeConfig(runtime) {
+  const errors = [];
+  const ids = new Set();
+  for (const profile of runtime.profiles ?? []) {
+    if (!profile.profileId) {
+      errors.push('Jedes Profil braucht eine id');
+      continue;
+    }
+    if (ids.has(profile.profileId)) errors.push(`Profil-ID "${profile.profileId}" ist doppelt`);
+    ids.add(profile.profileId);
+    if (!/^[a-zA-Z0-9_.-]+$/.test(profile.profileId)) {
+      errors.push(`Profil-ID "${profile.profileId}" darf nur Buchstaben, Zahlen, ".", "_" und "-" enthalten`);
+    }
+    const groupIds = new Set();
+    for (const group of profile.whatsappGroups ?? []) {
+      if (!group.id) {
+        errors.push(`WhatsApp-Gruppe in Profil "${profile.profileId}" braucht eine ID`);
+      } else if (groupIds.has(group.id)) {
+        errors.push(`WhatsApp-Gruppen-ID "${group.id}" ist in Profil "${profile.profileId}" doppelt`);
+      }
+      groupIds.add(group.id);
+    }
+    const enabledGroups = (profile.whatsappGroups ?? []).filter((group) => group.enabled);
+    if (!profile.dryRun && enabledGroups.length === 0) {
+      if (profile.profileId === 'default') errors.push('WHATSAPP_GROUP_ID muss gesetzt sein, wenn DRY_RUN=false');
+      errors.push(`Profil "${profile.profileId}" braucht im Live-Modus mindestens eine aktive WhatsApp-Gruppe`);
+    }
+    if (!profile.dryRun) {
+      for (const group of enabledGroups) {
+        if (!group.id.endsWith('@g.us')) {
+          errors.push(`WhatsApp-Gruppe "${group.name || group.id}" in Profil "${profile.profileId}" muss auf "@g.us" enden`);
+        }
+      }
+    }
+  }
+  if ((runtime.enabledProfiles ?? []).length === 0) {
+    errors.push('Mindestens ein Profil muss aktiviert sein');
+  }
+  if (errors.length > 0) {
+    throw new Error(`Konfigurationsfehler:\n  - ${errors.join('\n  - ')}`);
+  }
+  return runtime;
 }
 
 export { DEFAULTS };

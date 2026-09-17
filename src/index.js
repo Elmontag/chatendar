@@ -16,7 +16,9 @@
  *   8. Senden (oder im Dry-Run nur loggen) und State fortschreiben
  */
 
-import { loadConfig } from './config.js';
+import { fileURLToPath } from 'node:url';
+
+import { loadRuntimeConfig } from './config.js';
 import { parseArgs, USAGE } from './cli.js';
 import { fetchEvents, getCalendarSource } from './calendar/calendarSource.js';
 import { selectEvents } from './reminders/selector.js';
@@ -74,9 +76,14 @@ async function ladeUndSelektiere(config, now, horizontTage) {
  * im Normalbetrieb nur Minuten breit, ein einzelner Testlauf trifft also
  * fast nie eine fällige Erinnerung.
  */
-async function runPreview(config, now, tage, db) {
+async function runPreview(config, now, tage, db, target) {
   const source = getCalendarSource(config);
-  log.section(`Vorschau: die nächsten ${tage} Tage`);
+  const previewTarget = target ?? { id: 'default', name: '(keine Gruppen-ID gesetzt)' };
+  const previewScope = { profileId: config.profileId ?? 'default', targetId: previewTarget.id };
+  log.section(
+    `Vorschau: die nächsten ${tage} Tage` +
+      (config.profileId ? ` – Zielgruppe "${previewTarget.name || previewTarget.id}"` : ''),
+  );
   log.info(
     `Zeitpunkt: ${formatForLog(now, config.timezone)} (${config.timezone}) | ` +
       `Quelle: ${source.name} | Datei/Ziel: ${config.source === 'file' ? config.icsPath : config.caldav.url}`,
@@ -113,7 +120,7 @@ async function runPreview(config, now, tage, db) {
         (event.ort ? `  (${event.ort})` : ''),
     );
     for (const reminder of buildReminders(event, config)) {
-      const bereitsVersendet = db.isSent(reminder.eventId, reminder.offsetMinutes);
+      const bereitsVersendet = db.isSent(reminder.eventId, reminder.offsetMinutes, previewScope);
       const status = bereitsVersendet
         ? 'bereits versendet'
         : reminder.sendAt > now
@@ -132,7 +139,7 @@ async function runPreview(config, now, tage, db) {
   console.log('');
   if (config.digestEnabled) {
     const naechste = nextScheduledInstant(now, config);
-    const digest = evaluateDigest(config, { now, isSent: (id, off) => db.isSent(id, off) });
+    const digest = evaluateDigest(config, { now, isSent: (id, off) => db.isSent(id, off, previewScope) });
     const enthalten = eventsInRange(selected, digest.range);
     log.info(
       `Wochenübersicht: nächster Versand ${formatForLog(naechste, config.timezone)} ` +
@@ -150,180 +157,185 @@ async function runPreview(config, now, tage, db) {
   return 0;
 }
 
-/**
- * Einen kompletten Durchlauf ausführen.
- * @returns {Promise<number>} Exit-Code
- */
-export async function run(argv = process.argv.slice(2)) {
-  const args = parseArgs(argv);
-  if (args.help) {
-    console.log(USAGE);
-    return 0;
-  }
+function enabledTargets(profile) {
+  const groups = (profile.whatsappGroups ?? []).filter((group) => group.enabled);
+  if (groups.length > 0) return groups;
+  return profile.dryRun ? [{ id: 'default', name: '(keine Gruppen-ID gesetzt)', enabled: true }] : [];
+}
 
-  const config = loadConfig({ configFile: args.configFile, overrides: args.overrides });
-  setLevel(args.logLevel ?? config.logLevel);
-
-  const now = args.now ?? new Date();
-  const source = getCalendarSource(config);
-  const db = openDatabase(config.dbPath);
-
-  // Vorschau ist ein reiner Lesevorgang – kein Versand, kein State-Schreiben.
-  if (args.preview !== null) {
-    try {
-      return await runPreview(config, now, args.preview, db);
-    } finally {
-      db.close();
+async function runProfilePreview(profile, now, tage) {
+  const db = openDatabase(profile.dbPath);
+  try {
+    const groups = enabledTargets(profile);
+    log.section(`Profil "${profile.profileName}" – Vorschau`);
+    log.info(
+      `Profil-ID: ${profile.profileId} | Zielgruppen: ` +
+        (groups.length > 0 ? groups.map((group) => group.name || group.id).join(', ') : '(keine)'),
+    );
+    for (const group of groups) {
+      await runPreview(profile, now, tage, db, group);
     }
+    return 0;
+  } finally {
+    db.close();
   }
+}
 
-  log.section('Lauf gestartet');
-  log.info(
-    `Zeitpunkt: ${formatForLog(now, config.timezone)} (${config.timezone}) | ` +
-      `Quelle: ${source.name} | Modus: ${config.dryRun ? 'DRY-RUN (es wird nichts gesendet)' : 'LIVE'}`,
-  );
-  if (config.configFile) log.debug(`config.json verwendet: ${config.configFile}`);
+function scopedEntries(entries, profile, group) {
+  return entries.map((entry) => ({ ...entry, profileId: profile.profileId, targetId: group.id }));
+}
 
-  let exitCode = 0;
+async function runProfile(profile, now) {
+  const source = getCalendarSource(profile);
+  const db = openDatabase(profile.dbPath);
   let client = null;
+  let exitCode = 0;
+
+  log.section(`Profil "${profile.profileName}" gestartet`);
+  log.info(
+    `Zeitpunkt: ${formatForLog(now, profile.timezone)} (${profile.timezone}) | ` +
+      `Quelle: ${source.name} | Modus: ${profile.dryRun ? 'DRY-RUN (es wird nichts gesendet)' : 'LIVE'}`,
+  );
+  log.info(`Profil-ID: ${profile.profileId}`);
+  if (profile.configFile) log.debug(`config.json verwendet: ${profile.configFile}`);
 
   try {
-    db.prune(config.pruneAfterDays, now);
+    db.prune(profile.pruneAfterDays, now);
 
-    // ── 1. Termine laden und selektieren ────────────────────────────────
-    const { range, events, selected, rejected } = await ladeUndSelektiere(config, now, config.lookaheadDays);
-    log.info(`${events.length} Termin(e) im Zeitfenster bis ${formatForLog(range.to, config.timezone)} geladen`);
+    const { range, events, selected, rejected } = await ladeUndSelektiere(profile, now, profile.lookaheadDays);
+    log.info(`${events.length} Termin(e) im Zeitfenster bis ${formatForLog(range.to, profile.timezone)} geladen`);
 
-    if (!config.selectByCategory && !config.selectByPrefix) {
+    if (!profile.selectByCategory && !profile.selectByPrefix) {
       log.warn('Selektion ist deaktiviert – ALLE Termine des Kalenders werden verschickt.');
     }
     log.info(
-      `${selected.length} Termin(e) für WhatsApp markiert (${describeSelection(config)}), ` +
+      `${selected.length} Termin(e) für WhatsApp markiert (${describeSelection(profile)}), ` +
         `${rejected.length} nicht markiert`,
     );
     for (const event of selected) {
-      log.debug(`  markiert: "${event.titel}" am ${formatForLog(event.start, config.timezone)}`);
+      log.debug(`  markiert: "${event.titel}" am ${formatForLog(event.start, profile.timezone)}`);
     }
     if (events.length > 0 && selected.length === 0) {
       log.warn('Kein Termin ist markiert – mit "--preview" lässt sich prüfen, woran es liegt.');
     }
 
-    // ── 2. Fälligkeit der Erinnerungen prüfen ───────────────────────────
-    const { due, skipped } = evaluateReminders(selected, config, {
-      now,
-      isSent: (eventId, offsetMinutes) => db.isSent(eventId, offsetMinutes),
-    });
-    log.info(
-      `${due.length} Erinnerung(en) fällig, ${skipped.length} übersprungen` +
-        (skipped.length > 0 ? ` (${summarizeSkips(skipped)})` : ''),
-    );
-    for (const entry of skipped) {
-      log.debug(
-        `  übersprungen [${entry.reason}]: "${entry.event.titel}" – ${entry.offsetKey} vorher, ` +
-          `Versand wäre ${formatForLog(entry.sendAt, config.timezone)}`,
-      );
-    }
+    const targets = enabledTargets(profile);
+    if (!profile.dryRun) client = await createWhatsAppClient(profile);
 
-    // Verpasste Erinnerungen als erledigt vermerken, damit sie nicht bei jedem
-    // weiteren Lauf erneut geprüft und geloggt werden.
-    const missed = skipped.filter((entry) => entry.reason === SKIP_REASONS.WINDOW_MISSED);
-    if (missed.length > 0 && !config.dryRun) {
-      db.markManyProcessed(missed, SENT_STATUS.MISSED, now);
-      log.warn(
-        `${missed.length} Erinnerung(en) lagen vor dem Prüffenster (${config.checkWindowMinutes} min) ` +
-          'und werden nicht nachgeholt. Mit CATCH_UP=true würden sie nachgeholt.',
-      );
-    }
-
-    // ── 3. Nachrichten bauen ────────────────────────────────────────────
-    // Jeder Eintrag: eine Nachricht plus die zugehörigen State-Einträge.
-    const messages = [];
-
-    for (const group of groupReminders(due)) {
-      messages.push({
-        label: `${group.reminders.length} Termin(e), ${group.offsetKey} vorher`,
-        text: buildGroupMessage(group, config),
-        stateEntries: group.reminders,
-      });
-    }
-    if (messages.length > 0) {
-      log.info(`${messages.length} Sammelnachricht(en) aus ${due.length} Erinnerung(en) gebaut`);
-    }
-
-    // ── 4. Wochenübersicht ──────────────────────────────────────────────
-    if (config.digestEnabled) {
-      const digest = evaluateDigest(config, { now, isSent: (id, off) => db.isSent(id, off) });
-      const enthalten = eventsInRange(selected, digest.range);
-      const zeitraum = formatRangeLabel(digest.range, config);
-
-      if (digest.due && (enthalten.length > 0 || config.digestSendWhenEmpty)) {
-        messages.push({
-          label: `Wochenübersicht ${zeitraum}, ${enthalten.length} Termin(e)`,
-          text: buildDigestMessage(enthalten, digest.range, config),
-          // Pseudo-Erinnerung, damit der State-Schlüssel dieselbe Struktur hat.
-          stateEntries: [
-            {
-              eventId: digest.stateKey,
-              offsetMinutes: 0,
-              event: { titel: `Wochenübersicht ${zeitraum}`, start: digest.scheduledAt },
-              sendAt: digest.scheduledAt,
-            },
-          ],
-        });
-        log.info(`Wochenübersicht fällig (${zeitraum}) mit ${enthalten.length} Termin(en)`);
-      } else if (digest.due) {
-        log.info(
-          `Wochenübersicht wäre fällig (${zeitraum}), enthält aber keine Termine – ` +
-            'wird übersprungen (DIGEST_SEND_WHEN_EMPTY=false).',
-        );
-      } else {
-        log.debug(
-          `Wochenübersicht nicht fällig [${digest.reason}], geplanter Versand war ` +
-            `${formatForLog(digest.scheduledAt, config.timezone)}`,
-        );
-      }
-    }
-
-    if (messages.length === 0) {
-      log.info('Nichts zu senden.');
-      log.section('Lauf beendet');
-      return 0;
-    }
-
-    // ── 5. Versand ──────────────────────────────────────────────────────
-    if (!config.dryRun) {
-      client = await createWhatsAppClient(config);
-    }
-
-    for (const { label, text, stateEntries } of messages) {
-      if (config.dryRun) {
-        log.info(`[DRY-RUN] Nachricht an ${config.whatsappGroupId || '(keine Gruppen-ID gesetzt)'} – ${label}:`);
-        console.log(indent(text));
-        if (config.recordDryRun) {
-          db.markManyProcessed(stateEntries, SENT_STATUS.DRY_RUN, now);
-        }
-        continue;
-      }
-
+    for (const group of targets) {
       try {
-        const messageId = await client.sendText(config.whatsappGroupId, text);
-        // Erst nach erfolgreichem Versand persistieren – ein Fehler darf nicht
-        // dazu führen, dass die Erinnerung als erledigt gilt.
-        db.markManyProcessed(stateEntries, SENT_STATUS.SENT, now);
-        log.info(`Gesendet (${label}), Message-ID: ${messageId ?? 'unbekannt'}`);
+        const targetScope = { profileId: profile.profileId, targetId: group.id };
+        log.section(`Zielgruppe "${group.name || group.id}"`);
+        const { due, skipped } = evaluateReminders(selected, profile, {
+          now,
+          isSent: (eventId, offsetMinutes) => db.isSent(eventId, offsetMinutes, targetScope),
+        });
+        log.info(
+          `${due.length} Erinnerung(en) fällig, ${skipped.length} übersprungen` +
+            (skipped.length > 0 ? ` (${summarizeSkips(skipped)})` : ''),
+        );
+        for (const entry of skipped) {
+          log.debug(
+            `  übersprungen [${entry.reason}]: "${entry.event.titel}" – ${entry.offsetKey} vorher, ` +
+              `Versand wäre ${formatForLog(entry.sendAt, profile.timezone)}`,
+          );
+        }
+
+        const missed = skipped.filter((entry) => entry.reason === SKIP_REASONS.WINDOW_MISSED);
+        if (missed.length > 0) {
+          if (!profile.dryRun) db.markManyProcessed(scopedEntries(missed, profile, group), SENT_STATUS.MISSED, now);
+          log.warn(
+            `${missed.length} Erinnerung(en) lagen vor dem Prüffenster (${profile.checkWindowMinutes} min) ` +
+              (profile.dryRun
+                ? 'und würden im Live-Modus nicht nachgeholt. Dry-Run: State bleibt unverändert. '
+                : 'und werden nicht nachgeholt. ') +
+              'Mit CATCH_UP=true würden sie nachgeholt.',
+          );
+        }
+
+        const messages = [];
+        for (const reminderGroup of groupReminders(due)) {
+          messages.push({
+            label: `${reminderGroup.reminders.length} Termin(e), ${reminderGroup.offsetKey} vorher`,
+            text: buildGroupMessage(reminderGroup, profile, now),
+            stateEntries: scopedEntries(reminderGroup.reminders, profile, group),
+          });
+        }
+        if (messages.length > 0) {
+          log.info(`${messages.length} Sammelnachricht(en) aus ${due.length} Erinnerung(en) gebaut`);
+        }
+
+        if (profile.digestEnabled) {
+          const digest = evaluateDigest(profile, { now, isSent: (id, off) => db.isSent(id, off, targetScope) });
+          const enthalten = eventsInRange(selected, digest.range);
+          const zeitraum = formatRangeLabel(digest.range, profile);
+          if (digest.due && (enthalten.length > 0 || profile.digestSendWhenEmpty)) {
+            messages.push({
+              label: `Wochenübersicht ${zeitraum}, ${enthalten.length} Termin(e)`,
+              text: buildDigestMessage(enthalten, digest.range, profile, now),
+              stateEntries: scopedEntries([
+                {
+                  eventId: digest.stateKey,
+                  offsetMinutes: 0,
+                  event: { titel: `Wochenübersicht ${zeitraum}`, start: digest.scheduledAt },
+                  sendAt: digest.scheduledAt,
+                },
+              ], profile, group),
+            });
+            log.info(`Wochenübersicht fällig (${zeitraum}) mit ${enthalten.length} Termin(en)`);
+          } else if (digest.due) {
+            log.info(
+              `Wochenübersicht wäre fällig (${zeitraum}), enthält aber keine Termine – ` +
+                'wird übersprungen (DIGEST_SEND_WHEN_EMPTY=false).',
+            );
+          } else {
+            log.debug(
+              `Wochenübersicht nicht fällig [${digest.reason}], geplanter Versand war ` +
+                `${formatForLog(digest.scheduledAt, profile.timezone)}`,
+            );
+          }
+        }
+
+        if (messages.length === 0) {
+          log.info('Nichts zu senden.');
+          continue;
+        }
+
+        for (const { label, text, stateEntries } of messages) {
+          if (profile.dryRun) {
+            log.info(
+              `[DRY-RUN] Nachricht an ${group.name || '(unbenannte Gruppe)'} ` +
+                `(${group.id || 'keine Gruppen-ID gesetzt'}) – ${label}:`,
+            );
+            console.log(indent(text));
+            if (profile.recordDryRun) db.markManyProcessed(stateEntries, SENT_STATUS.DRY_RUN, now);
+            continue;
+          }
+
+          try {
+            const messageId = await client.sendText(group.id, text);
+            db.markManyProcessed(stateEntries, SENT_STATUS.SENT, now);
+            log.info(`Gesendet an ${group.name || group.id} (${label}), Message-ID: ${messageId ?? 'unbekannt'}`);
+          } catch (error) {
+            exitCode = 1;
+            log.error(`Versand fehlgeschlagen an ${group.name || group.id} (${label}): ${error.message}`);
+            log.error('Diese Nachricht wird beim nächsten Lauf erneut versucht (kein State-Eintrag geschrieben).');
+          }
+        }
       } catch (error) {
         exitCode = 1;
-        log.error(`Versand fehlgeschlagen (${label}): ${error.message}`);
-        log.error('Diese Nachricht wird beim nächsten Lauf erneut versucht (kein State-Eintrag geschrieben).');
+        log.error(
+          `Zielgruppe ${group.name || group.id} in Profil "${profile.profileName}" fehlgeschlagen: ${error.message}`,
+        );
       }
     }
 
-    if (config.dryRun && !config.recordDryRun) {
+    if (profile.dryRun && !profile.recordDryRun) {
       log.info('Dry-Run: State wurde NICHT verändert (RECORD_DRY_RUN=false) – der Lauf ist beliebig wiederholbar.');
     }
 
     log.debug(`State enthält jetzt ${db.count()} Eintrag/Einträge`);
-    log.section('Lauf beendet');
+    log.section(`Profil "${profile.profileName}" beendet`);
     return exitCode;
   } finally {
     if (client) {
@@ -337,8 +349,51 @@ export async function run(argv = process.argv.slice(2)) {
   }
 }
 
+/**
+ * Einen kompletten Durchlauf ausführen.
+ * @returns {Promise<number>} Exit-Code
+ */
+export async function run(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  const runtime = loadRuntimeConfig({ configFile: args.configFile, overrides: args.overrides });
+  setLevel(args.logLevel ?? runtime.logLevel);
+
+  const now = args.now ?? new Date();
+
+  if (args.preview !== null) {
+    let exitCode = 0;
+    for (const profile of runtime.enabledProfiles) {
+      try {
+        await runProfilePreview(profile, now, args.preview);
+      } catch (error) {
+        exitCode = 1;
+        log.error(`Vorschau für Profil "${profile.profileName}" fehlgeschlagen: ${error.message}`);
+      }
+    }
+    return exitCode;
+  }
+
+  let exitCode = 0;
+  for (const profile of runtime.enabledProfiles) {
+    let profileExit = 1;
+    try {
+      profileExit = await runProfile(profile, now);
+    } catch (error) {
+      log.error(`Profil "${profile.profileName}" fehlgeschlagen: ${error.message}`);
+    }
+    if (profileExit !== 0) exitCode = profileExit;
+  }
+  log.section('Lauf beendet');
+  return exitCode;
+}
+
 // Direktaufruf (nicht beim Import in Tests).
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     const code = await run();
     // Baileys hält u. U. noch Timer offen – deshalb explizit beenden.

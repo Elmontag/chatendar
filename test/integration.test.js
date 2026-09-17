@@ -24,6 +24,14 @@ function neuerStatePfad() {
   return path.join(dir, 'state.db');
 }
 
+function neueConfigDatei(config) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-config-e2e-'));
+  tempDirs.push(dir);
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return { dir, file };
+}
+
 /**
  * Leeres Arbeitsverzeichnis für die Testläufe.
  *
@@ -38,8 +46,8 @@ tempDirs.push(SAUBERES_CWD);
  * Einen Durchlauf starten und stdout UND stderr zurückgeben.
  * Warnungen landen auf stderr – die Tests sollen sie sehen.
  */
-function lauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}) {
-  const ergebnis = spawnSync(
+function starteLauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}) {
+  return spawnSync(
     process.execPath,
     [path.join(REPO_ROOT, 'src', 'index.js'), `--now=${now}`, '--dry-run', ...args],
     {
@@ -59,6 +67,10 @@ function lauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}
       },
     },
   );
+}
+
+function lauf(options = {}) {
+  const ergebnis = starteLauf(options);
 
   if (ergebnis.status !== 0) {
     throw new Error(`Lauf endete mit Code ${ergebnis.status}:\n${ergebnis.stderr}`);
@@ -121,6 +133,9 @@ describe('Prüffenster', () => {
   it('holt Erinnerungen vor dem Fenster nicht nach', () => {
     const ausgabe = lauf({ now: '2026-09-19T23:00:00Z' });
     assert.match(ausgabe, /prueffenster-verpasst/);
+    assert.match(ausgabe, /lagen vor dem Prüffenster \(60 min\)/);
+    assert.match(ausgabe, /Dry-Run: State bleibt unverändert/);
+    assert.match(ausgabe, /CATCH_UP=true/);
     assert.doesNotMatch(ausgabe, /Elternabend/);
   });
 
@@ -227,6 +242,190 @@ describe('Selektion abschaltbar', () => {
 
     assert.match(ausgabe, /Selektion ist deaktiviert – ALLE Termine/);
     assert.match(ausgabe, /Zahnarzt/);
+  });
+});
+
+describe('Mehrere Profile und Gruppen', () => {
+  it('sendet im Dry-Run dieselbe Profilnachricht an mehrere Gruppen', () => {
+    const dbPath = neuerStatePfad();
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'schule',
+          name: 'Schule',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          dbPath,
+          defaultReminders: '1d',
+          templateSingle: 'Schule: {titel}',
+          templateCollection: 'Schule: {anzahl} Termine\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: [
+            { id: '120363000000000001@g.us', name: 'Klasse 3' },
+            { id: '120363000000000002@g.us', name: 'Orga' },
+          ],
+        },
+      ],
+    });
+
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Profil "Schule" gestartet/);
+    assert.match(ausgabe, /Nachricht an Klasse 3 \(120363000000000001@g\.us\)/);
+    assert.match(ausgabe, /Nachricht an Orga \(120363000000000002@g\.us\)/);
+    assert.equal((ausgabe.match(/Schule: 2 Termine/g) ?? []).length, 2);
+  });
+
+  it('führt mehrere Profile mit eigenem Einstellungsstack aus', () => {
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'schule',
+          name: 'Schule',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          templateSingle: 'Schulprofil: {titel}',
+          templateCollection: 'Schulprofil: {anzahl}\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: ['120363000000000001@g.us'],
+        },
+        {
+          id: 'alle',
+          name: 'Alle Termine',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          selectByCategory: false,
+          selectByPrefix: false,
+          defaultReminders: '1d',
+          templateSingle: 'Alle: {titel}',
+          templateCollection: 'Alle: {anzahl}\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: ['120363000000000002@g.us'],
+        },
+      ],
+    });
+
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Profil "Schule" gestartet/);
+    assert.match(ausgabe, /Profil "Alle Termine" gestartet/);
+    assert.match(ausgabe, /Schulprofil:/);
+    assert.match(ausgabe, /Alle:/);
+    assert.match(ausgabe, /Elternabend Klasse 4b/);
+  });
+
+  it('haelt Profile mit gemeinsamer State-Datenbank strikt auseinander', () => {
+    const dbPath = neuerStatePfad();
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'schule',
+          name: 'Schule',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          dbPath,
+          recordDryRun: true,
+          defaultReminders: '1d',
+          templateSingle: 'Schulprofil: {titel}',
+          templateCollection: 'Schulprofil: {anzahl}\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: ['120363000000000001@g.us'],
+        },
+        {
+          id: 'alle',
+          name: 'Alle Termine',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          dbPath,
+          recordDryRun: true,
+          selectByCategory: false,
+          selectByPrefix: false,
+          defaultReminders: '1d',
+          templateSingle: 'Alleprofil: {titel}',
+          templateCollection: 'Alleprofil: {anzahl}\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: ['120363000000000002@g.us'],
+        },
+      ],
+    });
+
+    // Beide Profile teilen sich dieselbe State-Datenbank UND denselben
+    // Kalender-Event ("Elternabend"), damit ein fehlender profile_id-Scope
+    // sofort auffaellt: ohne Scope wuerde das zweite Profil die Erinnerung
+    // faelschlich als "bereits versendet" ueberspringen.
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Schulprofil: 2[\s\S]*?- Elternabend Klasse 4b/);
+    assert.match(ausgabe, /Alleprofil: 2[\s\S]*?- \[WA\] Elternabend Klasse 4b/);
+    assert.doesNotMatch(ausgabe, /bereits-versendet/);
+
+    // Zweiter Lauf mit derselben State-Datenbank: jetzt muss JEDES Profil
+    // seine eigene Erinnerung als bereits versendet erkennen (kein
+    // Cross-Profile-Leck in die andere Richtung).
+    const zweiterLauf = lauf({ now: '2026-09-19T17:05:00Z', dbPath, args: ['--config', file] });
+    assert.match(zweiterLauf, /Profil "Schule" gestartet[\s\S]*?bereits-versendet: 3/);
+    assert.match(zweiterLauf, /Profil "Alle Termine" gestartet[\s\S]*?bereits-versendet: 3/);
+  });
+
+  it('führt nach einem fehlgeschlagenen Profil weitere Profile aus', () => {
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'kaputt',
+          name: 'Fehlerprofil',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'nicht-vorhanden.ics'),
+        },
+        {
+          id: 'gesund',
+          name: 'Gesundes Profil',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          templateSingle: 'Gesund: {titel}',
+          templateCollection: 'Gesund: {anzahl}\n{items}',
+          templateCollectionItem: '- {titel}',
+        },
+      ],
+    });
+
+    const ergebnis = starteLauf({ args: ['--config', file] });
+    const ausgabe = `${ergebnis.stdout}${ergebnis.stderr}`;
+
+    assert.equal(ergebnis.status, 1);
+    assert.match(ausgabe, /Profil "Fehlerprofil" gestartet/);
+    assert.match(ausgabe, /Profil "Fehlerprofil" fehlgeschlagen:.*ICS-Datei nicht gefunden/);
+    assert.match(ausgabe, /Profil "Gesundes Profil" gestartet/);
+    assert.match(ausgabe, /Gesund: 2/);
+  });
+
+  it('sendet nur an aktivierte Gruppen, nicht an deaktivierte Gruppen', () => {
+    const { file } = neueConfigDatei({
+      profiles: [
+        {
+          id: 'schule',
+          name: 'Schule',
+          source: 'file',
+          icsPath: path.join(FIXTURES, 'beispiel.ics'),
+          defaultReminders: '1d',
+          templateSingle: 'Schule: {titel}',
+          templateCollection: 'Schule: {anzahl} Termine\n{items}',
+          templateCollectionItem: '- {titel}',
+          whatsappGroups: [
+            { id: '120363000000000001@g.us', name: 'Klasse 3', enabled: true },
+            { id: '120363000000000002@g.us', name: 'Orga', enabled: false },
+          ],
+        },
+      ],
+    });
+
+    const ausgabe = lauf({ now: '2026-09-19T17:00:00Z', args: ['--config', file] });
+
+    assert.match(ausgabe, /Profil "Schule" gestartet/);
+    assert.match(ausgabe, /Nachricht an Klasse 3 \(120363000000000001@g\.us\)/);
+    assert.doesNotMatch(ausgabe, /Nachricht an Orga \(120363000000000002@g\.us\)/);
+    assert.equal((ausgabe.match(/Schule: 2 Termine/g) ?? []).length, 1);
   });
 });
 
