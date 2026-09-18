@@ -526,11 +526,13 @@ Passend dazu in der `.env`: `CHECK_WINDOW_MINUTES=30`.
 ### Cronjob (Alternative)
 
 ```cron
-*/15 * * * * cd /opt/chatendar && /usr/bin/node src/index.js >> /var/log/chatendar.log 2>&1
+*/15 * * * * cd /opt/chatendar && /usr/bin/flock -n data/chatendar-cron.lock /usr/bin/node src/index.js >> /var/log/chatendar.log 2>&1
 ```
 
 Cron startet mit minimalem Environment – deshalb das `cd`, damit `.env`,
-`auth_session/` und `data/` gefunden werden.
+`auth_session/` und `data/` gefunden werden. `flock` verhindert, dass ein
+noch laufender Durchlauf vom nächsten Cron-Termin überlappt wird. Zusätzlich
+sperrt chatendar den jeweiligen Session-Ordner während einer WhatsApp-Verbindung.
 
 ## Bedienung
 

@@ -46,8 +46,7 @@ async function main() {
 
 try {
   await main();
-  process.exit(0);
 } catch (error) {
   log.error(error.message);
-  process.exit(1);
+  process.exitCode = 1;
 }

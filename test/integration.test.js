@@ -46,10 +46,10 @@ tempDirs.push(SAUBERES_CWD);
  * Einen Durchlauf starten und stdout UND stderr zurückgeben.
  * Warnungen landen auf stderr – die Tests sollen sie sehen.
  */
-function starteLauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [] } = {}) {
+function starteLauf({ now = '2026-09-19T17:00:00Z', dbPath, env = {}, args = [], dryRun = true } = {}) {
   return spawnSync(
     process.execPath,
-    [path.join(REPO_ROOT, 'src', 'index.js'), `--now=${now}`, '--dry-run', ...args],
+    [path.join(REPO_ROOT, 'src', 'index.js'), `--now=${now}`, ...(dryRun ? ['--dry-run'] : []), ...args],
     {
       cwd: SAUBERES_CWD,
       encoding: 'utf8',
@@ -126,6 +126,25 @@ describe('Duplikatsvermeidung über mehrere Läufe', () => {
     assert.match(zweiterLauf, /0 Erinnerung\(en\) fällig/);
     assert.match(zweiterLauf, /bereits-versendet: 3/);
     assert.match(zweiterLauf, /Nichts zu senden/);
+  });
+});
+
+describe('Live-Lauf ohne fällige Nachrichten', () => {
+  it('öffnet keine unnötige WhatsApp-Verbindung', () => {
+    const authDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-unused-auth-')), 'session');
+    tempDirs.push(path.dirname(authDir));
+    const ergebnis = starteLauf({
+      now: '2026-11-20T12:00:00Z',
+      dryRun: false,
+      env: {
+        AUTH_DIR: authDir,
+        WHATSAPP_GROUP_ID: '120363000000000001@g.us',
+      },
+    });
+
+    assert.equal(ergebnis.status, 0, ergebnis.stderr);
+    assert.match(`${ergebnis.stdout}${ergebnis.stderr}`, /Nichts zu senden/);
+    assert.equal(fs.existsSync(authDir), false);
   });
 });
 

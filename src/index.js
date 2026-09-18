@@ -231,7 +231,6 @@ async function runProfile(profile, now) {
     }
 
     const targets = enabledTargets(profile);
-    if (!profile.dryRun) client = await createWhatsAppClient(profile);
 
     for (const target of targets) {
       try {
@@ -328,6 +327,7 @@ async function runProfile(profile, now) {
           }
 
           try {
+            if (!client) client = await createWhatsAppClient(profile);
             const messageId = await client.sendText(target, text);
             db.markManyProcessed(stateEntries, SENT_STATUS.SENT, now);
             log.info(
@@ -414,13 +414,12 @@ export async function run(argv = process.argv.slice(2)) {
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     const code = await run();
-    // Baileys hält u. U. noch Timer offen – deshalb explizit beenden.
-    process.exit(code);
+    process.exitCode = code;
   } catch (error) {
     log.error(error.message);
     if (process.env.LOG_LEVEL === 'debug' || process.argv.includes('--verbose')) {
       console.error(error);
     }
-    process.exit(1);
+    process.exitCode = 1;
   }
 }

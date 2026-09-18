@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 
 import { DisconnectReason } from '@whiskeysockets/baileys';
 
-import { buildClient, disconnectPolicy } from '../src/messaging/whatsappClient.js';
+import {
+  acquireSessionLock,
+  buildClient,
+  disconnectPolicy,
+} from '../src/messaging/whatsappClient.js';
 
 function makeSocket({ registered = true } = {}) {
   const sent = [];
@@ -41,6 +48,38 @@ function config() {
 }
 
 describe('WhatsApp-Client', () => {
+  it('verhindert die parallele Verwendung eines Session-Ordners', () => {
+    const authDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatendar-auth-'));
+    const release = acquireSessionLock(authDir);
+
+    try {
+      assert.throws(() => acquireSessionLock(authDir), /wird bereits von Prozess/);
+      release();
+      const releaseAgain = acquireSessionLock(authDir);
+      releaseAgain();
+    } finally {
+      fs.rmSync(authDir, { recursive: true, force: true });
+    }
+  });
+
+  it('wartet beim Schließen auf Session-Schreibvorgänge und gibt die Sperre einmalig frei', async () => {
+    const socket = makeSocket();
+    const calls = [];
+    const client = buildClient(socket, config(), {
+      persistCredentials: () => {},
+      flushCredentials: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        calls.push('flush');
+      },
+      releaseLock: () => calls.push('release'),
+    });
+
+    await client.close();
+    await client.close();
+
+    assert.deepEqual(calls, ['flush', 'release']);
+  });
+
   it('behält regulären Pairing-Neustart bei und übernimmt Rate-Limit-Backoff', () => {
     assert.deepEqual(disconnectPolicy(DisconnectReason.restartRequired).shouldReconnect, true);
     assert.equal(disconnectPolicy(DisconnectReason.restartRequired).retryAfterMs, 2000);

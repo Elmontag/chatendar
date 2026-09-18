@@ -74,6 +74,53 @@ function statusCodeOf(error) {
   return error?.output?.statusCode ?? error?.status ?? null;
 }
 
+/** Verhindert, dass zwei Prozesse dieselbe Baileys-Session gleichzeitig verwenden. */
+export function acquireSessionLock(authDir) {
+  fs.mkdirSync(authDir, { recursive: true });
+  const lockPath = path.join(authDir, '.chatendar.lock');
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const descriptor = fs.openSync(lockPath, 'wx');
+      fs.writeFileSync(descriptor, `${process.pid}\n`);
+      fs.closeSync(descriptor);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          fs.unlinkSync(lockPath);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+
+      const lockStat = fs.statSync(lockPath);
+      const ownerPid = Number.parseInt(fs.readFileSync(lockPath, 'utf8'), 10);
+      let ownerRunning = Number.isInteger(ownerPid);
+      if (ownerRunning) {
+        try {
+          process.kill(ownerPid, 0);
+        } catch (probeError) {
+          ownerRunning = probeError.code === 'EPERM';
+        }
+      }
+      const lockIsBeingCreated = !Number.isInteger(ownerPid) && Date.now() - lockStat.mtimeMs < 5000;
+      if (ownerRunning || lockIsBeingCreated) {
+        throw new Error(
+          `WhatsApp-Session "${authDir}" wird bereits${ownerRunning ? ` von Prozess ${ownerPid}` : ''} verwendet. ` +
+            'Überlappende Cron-Läufe sind nicht zulässig.',
+        );
+      }
+      fs.unlinkSync(lockPath);
+    }
+  }
+
+  throw new Error(`Sperre für WhatsApp-Session "${authDir}" konnte nicht angelegt werden`);
+}
+
 /** Liegt in AUTH_DIR bereits eine gekoppelte Session? */
 export function hasSession(authDir) {
   return fs.existsSync(path.join(authDir, 'creds.json'));
@@ -91,72 +138,101 @@ export function hasSession(authDir) {
  */
 export async function createWhatsAppClient(config, { allowQr = false } = {}) {
   const { authDir, connectTimeoutMs } = config;
+  const releaseLock = acquireSessionLock(authDir);
 
-  if (!hasSession(authDir) && !allowQr) {
-    throw new Error(
-      `Keine WhatsApp-Session in "${authDir}" gefunden.\n` +
-        '   Bitte einmalig "npm run pair" ausführen und den QR-Code mit WhatsApp scannen\n' +
-        '   (WhatsApp > Einstellungen > Verknüpfte Geräte > Gerät verknüpfen).',
-    );
-  }
-
-  fs.mkdirSync(authDir, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
-
-  // Protokollversion abfragen; bei Netzproblemen mit der mitgelieferten weitermachen.
-  let version;
   try {
-    ({ version } = await fetchLatestBaileysVersion());
-    log.debug(`Baileys-Protokollversion: ${version.join('.')}`);
-  } catch (error) {
-    log.warn(`Protokollversion konnte nicht abgefragt werden (${error.message}) – nutze die eingebaute`);
-  }
+    if (!hasSession(authDir) && !allowQr) {
+      throw new Error(
+        `Keine WhatsApp-Session in "${authDir}" gefunden.\n` +
+          '   Bitte einmalig "npm run pair" ausführen und den QR-Code mit WhatsApp scannen\n' +
+          '   (WhatsApp > Einstellungen > Verknüpfte Geräte > Gerät verknüpfen).',
+      );
+    }
 
-  const maxAttempts = 3;
-  let lastError = null;
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    let credentialWrites = Promise.resolve();
+    let credentialWriteError = null;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const socket = makeWASocket({
-      version,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
-      },
-      logger: silentLogger,
-      printQRInTerminal: false, // wir rendern den QR-Code selbst
-      browser: ['chatendar', 'Chrome', '1.0.0'],
-      markOnlineOnConnect: false, // Push-Benachrichtigungen auf dem Handy nicht unterdrücken
-      syncFullHistory: false,
-    });
+    function persistCredentials() {
+      credentialWrites = credentialWrites
+        .then(() => saveCreds())
+        .catch((error) => {
+          credentialWriteError ??= error;
+        });
+    }
 
-    socket.ev.on('creds.update', saveCreds);
+    async function flushCredentials() {
+      await credentialWrites;
+      if (credentialWriteError) {
+        throw new Error(`WhatsApp-Session konnte nicht gespeichert werden: ${credentialWriteError.message}`);
+      }
+    }
 
-    let outcome;
+    // Protokollversion abfragen; bei Netzproblemen mit der mitgelieferten weitermachen.
+    let version;
     try {
-      outcome = await waitForConnection(socket, { connectTimeoutMs, allowQr });
+      ({ version } = await fetchLatestBaileysVersion());
+      log.debug(`Baileys-Protokollversion: ${version.join('.')}`);
     } catch (error) {
-      lastError = error;
+      log.warn(`Protokollversion konnte nicht abgefragt werden (${error.message}) – nutze die eingebaute`);
+    }
+
+    const maxAttempts = 3;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const socket = makeWASocket({
+        version,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
+        },
+        logger: silentLogger,
+        printQRInTerminal: false, // wir rendern den QR-Code selbst
+        browser: ['chatendar', 'Chrome', '1.0.0'],
+        markOnlineOnConnect: false, // Push-Benachrichtigungen auf dem Handy nicht unterdrücken
+        syncFullHistory: false,
+      });
+
+      socket.ev.on('creds.update', persistCredentials);
+
+      let outcome;
+      try {
+        outcome = await waitForConnection(socket, { connectTimeoutMs, allowQr });
+      } catch (error) {
+        safeEnd(socket);
+        socket.ev.off('creds.update', persistCredentials);
+        await flushCredentials();
+        throw error; // nicht behebbar (z. B. ausgeloggt, Timeout)
+      }
+
+      if (outcome.connected) {
+        log.info(`WhatsApp verbunden als "${socket.user?.name ?? socket.user?.id ?? 'unbekannt'}"`);
+        return buildClient(socket, config, {
+          persistCredentials,
+          flushCredentials,
+          releaseLock,
+        });
+      }
+
+      // Verbindung wurde geschlossen, ein neuer Versuch ist aber sinnvoll.
       safeEnd(socket);
-      throw error; // nicht behebbar (z. B. ausgeloggt, Timeout)
+      socket.ev.off('creds.update', persistCredentials);
+      await flushCredentials();
+      lastError = outcome.error;
+      log.warn(
+        `Verbindungsversuch ${attempt}/${maxAttempts} fehlgeschlagen (${outcome.reasonText}) – neuer Versuch`,
+      );
+      await delay(outcome.retryAfterMs ?? 2000 * attempt);
     }
 
-    if (outcome.connected) {
-      log.info(`WhatsApp verbunden als "${socket.user?.name ?? socket.user?.id ?? 'unbekannt'}"`);
-      return buildClient(socket, config);
-    }
-
-    // Verbindung wurde geschlossen, ein neuer Versuch ist aber sinnvoll.
-    safeEnd(socket);
-    lastError = outcome.error;
-    log.warn(
-      `Verbindungsversuch ${attempt}/${maxAttempts} fehlgeschlagen (${outcome.reasonText}) – neuer Versuch`,
+    throw new Error(
+      `WhatsApp-Verbindung nach ${maxAttempts} Versuchen fehlgeschlagen: ${lastError?.message ?? 'unbekannter Grund'}`,
     );
-    await delay(outcome.retryAfterMs ?? 2000 * attempt);
+  } catch (error) {
+    releaseLock();
+    throw error;
   }
-
-  throw new Error(
-    `WhatsApp-Verbindung nach ${maxAttempts} Versuchen fehlgeschlagen: ${lastError?.message ?? 'unbekannter Grund'}`,
-  );
 }
 
 /**
@@ -265,9 +341,18 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
 }
 
 /** Öffentliche Client-Schnittstelle um den Socket herum. */
-export function buildClient(socket, config) {
+export function buildClient(
+  socket,
+  config,
+  {
+    persistCredentials = null,
+    flushCredentials = async () => {},
+    releaseLock = () => {},
+  } = {},
+) {
   const sendGuard = createSendGuard(config);
   const verifiedPeople = new Map();
+  let closed = false;
 
   sendGuard.onReconnect();
 
@@ -324,8 +409,16 @@ export function buildClient(socket, config) {
 
     /** Socket schließen – die Session bleibt erhalten. */
     async close() {
+      if (closed) return;
+      closed = true;
       socket.ev.off('connection.update', onConnectionUpdate);
-      safeEnd(socket);
+      try {
+        safeEnd(socket);
+        if (persistCredentials) socket.ev.off('creds.update', persistCredentials);
+        await flushCredentials();
+      } finally {
+        releaseLock();
+      }
     },
   };
 }
