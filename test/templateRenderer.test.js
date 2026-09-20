@@ -129,7 +129,7 @@ describe('buildGroupMessage', () => {
   it('nutzt bei einem Termin das Einzel-Template', () => {
     const event = makeEvent({ titel: 'Elternabend', ort: 'Aula', start: new Date('2026-09-20T16:30:00Z') });
     const group = groupReminders(buildReminders(event, config))[0];
-    const text = buildGroupMessage(group, config);
+    const text = buildGroupMessage(group, config, new Date('2026-09-17T12:00:00Z'));
 
     assert.match(text, /Elternabend/);
     assert.match(text, /In 3 Tagen, 20\.09\.2026/);

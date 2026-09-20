@@ -187,6 +187,9 @@ describe('eventsInRange', () => {
   });
 });
 
+/** Fester Bezugszeitpunkt: relative Angaben ("In 4 Tagen") dürfen nicht vom heutigen Datum abhängen. */
+const REFERENZ = new Date('2026-09-17T12:00:00Z');
+
 describe('Nachricht der Wochenübersicht', () => {
   const config = digestConfig();
   const range = { from: new Date('2026-09-20T22:00:00Z'), to: new Date('2026-09-27T22:00:00Z') };
@@ -196,7 +199,7 @@ describe('Nachricht der Wochenübersicht', () => {
       makeEvent({ id: 'a', titel: 'Elternabend', ort: 'Aula', start: new Date('2026-09-21T15:00:00Z') }),
       makeEvent({ id: 'b', titel: 'Training', start: new Date('2026-09-25T17:00:00Z') }),
     ];
-    const text = buildDigestMessage(events, range, config);
+    const text = buildDigestMessage(events, range, config, REFERENZ);
 
     assert.match(text, /Termine der kommenden Woche/);
     assert.match(text, /In 4 Tagen, 21\.09\.2026/);
