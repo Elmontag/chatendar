@@ -31,6 +31,20 @@ describe('Konfiguration', () => {
     assert.equal(config.maxReminders, 2);
     assert.equal(config.antibanEnabled, true);
     assert.equal(config.sendDelayMaxMs, 7000);
+    assert.equal(config.sendSettleMs, 10000);
+    assert.equal(config.keepaliveDays, 7);
+    assert.equal(config.sessionBackupKeep, 7);
+    assert.ok(path.isAbsolute(config.sessionBackupDir));
+    assert.match(config.sessionBackupDir, /session-backups$/);
+  });
+
+  it('liest Keepalive- und Sicherungs-Einstellungen und lehnt negative Werte ab', () => {
+    const config = lade({ KEEPALIVE_DAYS: '3', SESSION_BACKUP_KEEP: '0', SESSION_BACKUP_DIR: '/tmp/sicherung' });
+    assert.equal(config.keepaliveDays, 3);
+    assert.equal(config.sessionBackupKeep, 0);
+    assert.equal(config.sessionBackupDir, '/tmp/sicherung');
+    assert.throws(() => lade({ KEEPALIVE_DAYS: '-1' }), /KEEPALIVE_DAYS darf nicht negativ sein/);
+    assert.throws(() => lade({ SESSION_BACKUP_KEEP: '-2' }), /SESSION_BACKUP_KEEP darf nicht negativ sein/);
   });
 
   it('löst Pfade absolut auf', () => {

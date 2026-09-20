@@ -81,6 +81,10 @@ const DEFAULTS = {
   connectTimeoutMs: 60000,
   sendDelayMs: 1500,
   sendDelayMaxMs: 7000,
+  sendSettleMs: 10000,
+  keepaliveDays: 7,
+  sessionBackupKeep: 7,
+  sessionBackupDir: './data/session-backups',
 
   // State
   dbPath: './data/reminders.db',
@@ -288,6 +292,14 @@ function buildResolvedConfig(f, env, overrides, cwd, filePath) {
       DEFAULTS.sendDelayMaxMs,
       'SEND_DELAY_MAX_MS',
     ),
+    sendSettleMs: toInt(pick(env.SEND_SETTLE_MS, f.sendSettleMs), DEFAULTS.sendSettleMs, 'SEND_SETTLE_MS'),
+    keepaliveDays: toInt(pick(env.KEEPALIVE_DAYS, f.keepaliveDays), DEFAULTS.keepaliveDays, 'KEEPALIVE_DAYS'),
+    sessionBackupKeep: toInt(
+      pick(env.SESSION_BACKUP_KEEP, f.sessionBackupKeep),
+      DEFAULTS.sessionBackupKeep,
+      'SESSION_BACKUP_KEEP',
+    ),
+    sessionBackupDir: pick(env.SESSION_BACKUP_DIR, f.sessionBackupDir, DEFAULTS.sessionBackupDir),
 
     dbPath: pick(env.DB_PATH, f.dbPath, DEFAULTS.dbPath),
     pruneAfterDays: toInt(pick(env.PRUNE_AFTER_DAYS, f.pruneAfterDays), DEFAULTS.pruneAfterDays, 'PRUNE_AFTER_DAYS'),
@@ -306,6 +318,7 @@ function buildResolvedConfig(f, env, overrides, cwd, filePath) {
 
   resolved.icsPath = path.resolve(cwd, resolved.icsPath);
   resolved.authDir = path.resolve(cwd, resolved.authDir);
+  resolved.sessionBackupDir = path.resolve(cwd, resolved.sessionBackupDir);
   resolved.dbPath = path.resolve(cwd, resolved.dbPath);
   resolved.configFile = fs.existsSync(filePath) ? filePath : null;
   return resolved;
@@ -467,6 +480,9 @@ export function validate(config) {
     }
   }
   if (config.sendDelayMs < 0) errors.push('SEND_DELAY_MS darf nicht negativ sein');
+  if (config.sendSettleMs < 0) errors.push('SEND_SETTLE_MS darf nicht negativ sein');
+  if (config.keepaliveDays < 0) errors.push('KEEPALIVE_DAYS darf nicht negativ sein');
+  if (config.sessionBackupKeep < 0) errors.push('SESSION_BACKUP_KEEP darf nicht negativ sein');
   if (config.sendDelayMaxMs < config.sendDelayMs) {
     errors.push('SEND_DELAY_MAX_MS muss größer oder gleich SEND_DELAY_MS sein');
   }

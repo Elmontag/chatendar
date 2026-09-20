@@ -11,6 +11,7 @@
     "start": "node src/index.js",
     "dry-run": "node src/index.js --dry-run",
     "pair": "node src/pair.js",
+    "keepalive": "node src/index.js --keepalive",
     "settings": "node src/settings/server.js",
     "test": "node --test \"test/*.test.js\""
   },

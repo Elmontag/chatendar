@@ -13,6 +13,8 @@ Optionen:
                        (Default 14 Tage). Sendet nichts, ändert nichts.
   --dry-run            Nachrichten nur anzeigen, nichts senden (überschreibt DRY_RUN)
   --live               Tatsächlich senden (überschreibt DRY_RUN=true)
+  --keepalive          Nur WhatsApp verbinden und wieder schließen (hält die Session in
+                       Benutzung, sendet nichts, lädt keinen Kalender)
   --now <ISO-Zeit>     Referenzzeitpunkt für den Lauf (z. B. 2026-09-19T18:00:00Z) – zum Testen
   --config <Pfad>      Pfad zu einer config.json
   --verbose, -v        Ausführliches Logging (Log-Level debug)
@@ -21,7 +23,7 @@ Optionen:
 
 Exit-Codes:
   0  Lauf erfolgreich
-  1  Fehler (Konfiguration, Kalender, Versand)
+  1  Fehler (Konfiguration, Kalender, Versand, Keepalive)
 `.trim();
 
 /**
@@ -29,7 +31,7 @@ Exit-Codes:
  * @returns {{overrides: object, now: Date|null, configFile: string|null, logLevel: string|null, help: boolean}}
  */
 export function parseArgs(argv) {
-  const result = { overrides: {}, now: null, configFile: null, logLevel: null, help: false, preview: null };
+  const result = { overrides: {}, now: null, configFile: null, logLevel: null, help: false, preview: null, keepalive: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -61,6 +63,9 @@ export function parseArgs(argv) {
         result.preview = parsed;
         break;
       }
+      case '--keepalive':
+        result.keepalive = true;
+        break;
       case '--dry-run':
         result.overrides.dryRun = true;
         break;

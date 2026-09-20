@@ -16,11 +16,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  BufferJSON,
   default as makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
+  WAMessageStatus,
 } from '@whiskeysockets/baileys';
 import { classifyDisconnect } from 'baileys-antiban';
 import pino from 'pino';
@@ -28,10 +30,50 @@ import qrcode from 'qrcode-terminal';
 
 import { log } from '../logger.js';
 import { createSendGuard } from './sendGuard.js';
+import { maintainSession, recordConnection } from './sessionMaintenance.js';
 import { targetAddress, targetJid, WHATSAPP_TARGET_TYPES } from './whatsappTarget.js';
 
-/** Baileys ist sehr gesprächig – eigenes Logging reicht uns. */
-const silentLogger = pino({ level: 'silent' });
+/** Kurze Nachlaufzeit nach der letzten Zustellbestätigung (späte Retry-Anfragen einzelner Gruppenmitglieder). */
+const SETTLE_TAIL_MS = 1500;
+
+/** Wie viele gesendete Nachrichten für Retry-Anfragen im Speicher bleiben. */
+const SENT_MESSAGE_LIMIT = 256;
+
+/**
+ * Baileys ist sehr gesprächig – eigenes Logging reicht uns.
+ *
+ * Zur Fehlersuche (z. B. "Warte auf diese Nachricht" beim Empfänger) lässt sich das
+ * Baileys-Protokoll mit BAILEYS_LOG_LEVEL=debug in BAILEYS_LOG_FILE
+ * (Standard ./data/baileys.log) mitschreiben. Die Datei enthält Rufnummern und
+ * gehört nicht ins Repo (data/ ist in .gitignore).
+ */
+export function createBaileysLogger(env = process.env) {
+  const level = env.BAILEYS_LOG_LEVEL?.trim();
+  if (!level || level === 'silent') return pino({ level: 'silent' });
+  const dest = path.resolve(env.BAILEYS_LOG_FILE?.trim() || './data/baileys.log');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  return pino({ level }, pino.destination({ dest, sync: true }));
+}
+
+/**
+ * Merkt sich zuletzt gesendete Nachrichten. Baileys braucht sie über `getMessage`,
+ * um Retry-Anfragen eines Empfängers zu beantworten, der die Nachricht nicht
+ * entschlüsseln konnte (sonst bleibt dort "Warte auf diese Nachricht" stehen).
+ */
+export function createMessageStore(limit = SENT_MESSAGE_LIMIT) {
+  const messages = new Map();
+  return {
+    remember(id, message) {
+      if (!id || !message) return;
+      messages.delete(id);
+      messages.set(id, message);
+      while (messages.size > limit) messages.delete(messages.keys().next().value);
+    },
+    get(id) {
+      return messages.get(id);
+    },
+  };
+}
 
 /** Disconnect-Gründe, bei denen ein erneuter Verbindungsversuch sinnvoll ist. */
 const RETRYABLE = new Set([
@@ -121,6 +163,54 @@ export function acquireSessionLock(authDir) {
   throw new Error(`Sperre für WhatsApp-Session "${authDir}" konnte nicht angelegt werden`);
 }
 
+const CREDS_FILE = 'creds.json';
+
+/** Ist die Datei lesbares JSON mit den Grundschlüsseln einer Baileys-Session? */
+function isValidCredsFile(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Boolean(parsed && typeof parsed === 'object' && parsed.noiseKey && parsed.signedIdentityKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Baileys schreibt creds.json mit einem einfachen writeFile (erst leeren, dann
+ * schreiben). Bricht der Prozess dabei ab (SIGKILL, Stromausfall, Speicher voll),
+ * bleibt eine unlesbare Datei zurück, Baileys legt stillschweigend neue
+ * Zugangsdaten an, und es muss neu gekoppelt werden. Deshalb: temporäre Datei
+ * schreiben, auf Platte sichern, dann atomar umbenennen – und die letzte gültige
+ * Fassung als creds.json.bak aufheben.
+ */
+export function writeCredsAtomically(authDir, creds) {
+  const file = path.join(authDir, CREDS_FILE);
+  const temporary = `${file}.${process.pid}.tmp`;
+  const descriptor = fs.openSync(temporary, 'w', 0o600);
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(creds, BufferJSON.replacer));
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (isValidCredsFile(file)) fs.copyFileSync(file, `${file}.bak`);
+  fs.renameSync(temporary, file);
+}
+
+/**
+ * Ist creds.json vorhanden, aber unlesbar, wird die letzte gültige Sicherung
+ * wiederhergestellt. Eine fehlende Datei (bewusst gelöscht = neu koppeln) bleibt fehlend.
+ * @returns {boolean} true, wenn wiederhergestellt wurde
+ */
+export function restoreCredsBackup(authDir) {
+  const file = path.join(authDir, CREDS_FILE);
+  const backup = `${file}.bak`;
+  if (!fs.existsSync(file) || isValidCredsFile(file) || !isValidCredsFile(backup)) return false;
+  fs.copyFileSync(file, `${file}.corrupt`);
+  fs.copyFileSync(backup, file);
+  return true;
+}
+
 /** Liegt in AUTH_DIR bereits eine gekoppelte Session? */
 export function hasSession(authDir) {
   return fs.existsSync(path.join(authDir, 'creds.json'));
@@ -141,6 +231,13 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
   const releaseLock = acquireSessionLock(authDir);
 
   try {
+    if (restoreCredsBackup(authDir)) {
+      log.warn(
+        `creds.json in "${authDir}" war beschädigt und wurde aus creds.json.bak wiederhergestellt ` +
+          '(die defekte Datei liegt als creds.json.corrupt daneben).',
+      );
+    }
+
     if (!hasSession(authDir) && !allowQr) {
       throw new Error(
         `Keine WhatsApp-Session in "${authDir}" gefunden.\n` +
@@ -149,7 +246,10 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
       );
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    const { state } = await useMultiFileAuthState(authDir);
+    const saveCreds = async () => writeCredsAtomically(authDir, state.creds);
+    const baileysLogger = createBaileysLogger();
+    const messageStore = createMessageStore();
     let credentialWrites = Promise.resolve();
     let credentialWriteError = null;
 
@@ -185,9 +285,10 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
         version,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
+          keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
         },
-        logger: silentLogger,
+        logger: baileysLogger,
+        getMessage: async (key) => messageStore.get(key?.id),
         printQRInTerminal: false, // wir rendern den QR-Code selbst
         browser: ['chatendar', 'Chrome', '1.0.0'],
         markOnlineOnConnect: false, // Push-Benachrichtigungen auf dem Handy nicht unterdrücken
@@ -208,10 +309,19 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
 
       if (outcome.connected) {
         log.info(`WhatsApp verbunden als "${socket.user?.name ?? socket.user?.id ?? 'unbekannt'}"`);
+        try {
+          recordConnection(authDir);
+        } catch (error) {
+          log.warn(`Verbindungszeitpunkt konnte nicht gespeichert werden: ${error.message}`);
+        }
         return buildClient(socket, config, {
           persistCredentials,
           flushCredentials,
           releaseLock,
+          messageStore,
+          alreadySynced: outcome.synced,
+          // Nach erfolgreichem Pairing immer sichern, sonst höchstens einmal täglich.
+          afterClose: () => maintainSession(config, { force: allowQr }),
         });
       }
 
@@ -238,7 +348,7 @@ export async function createWhatsAppClient(config, { allowQr = false } = {}) {
 /**
  * Wartet auf "connection: open" bzw. einen endgültigen Abbruch.
  *
- * @returns {Promise<{connected: boolean, error?: Error, reasonText?: string, retryAfterMs?: number}>}
+ * @returns {Promise<{connected: boolean, synced?: boolean, error?: Error, reasonText?: string, retryAfterMs?: number}>}
  *          Auflösung mit connected=false bedeutet "erneut versuchen".
  *          Endgültige Fehler werden geworfen.
  */
@@ -246,6 +356,7 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let qrShown = false;
+    let synced = false;
 
     const timer = setTimeout(() => {
       finish(() =>
@@ -268,6 +379,7 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
 
     function onUpdate(update) {
       const { connection, lastDisconnect, qr } = update;
+      if (update.receivedPendingNotifications) synced = true;
 
       if (qr) {
         if (!allowQr) {
@@ -290,7 +402,7 @@ function waitForConnection(socket, { connectTimeoutMs, allowQr }) {
       }
 
       if (connection === 'open') {
-        finish(() => resolve({ connected: true }));
+        finish(() => resolve({ connected: true, synced }));
         return;
       }
 
@@ -348,19 +460,98 @@ export function buildClient(
     persistCredentials = null,
     flushCredentials = async () => {},
     releaseLock = () => {},
+    messageStore = createMessageStore(),
+    alreadySynced = false,
+    afterClose = null,
   } = {},
 ) {
   const sendGuard = createSendGuard(config);
   const verifiedPeople = new Map();
+  const settleMs = config.sendSettleMs ?? 0;
+  const awaitingDelivery = new Set();
+  const delivered = new Set();
+  let sentCount = 0;
+  let onAllDelivered = null;
+  let connectionLost = false;
+  let synced = alreadySynced;
+  let onSynced = null;
   let closed = false;
 
   sendGuard.onReconnect();
 
-  const onConnectionUpdate = ({ connection, lastDisconnect }) => {
-    if (connection === 'close') sendGuard.onDisconnect(statusCodeOf(lastDisconnect?.error));
-    if (connection === 'open') sendGuard.onReconnect();
+  function markDelivered(id) {
+    if (!id) return;
+    delivered.add(id);
+    if (awaitingDelivery.delete(id) && awaitingDelivery.size === 0) onAllDelivered?.();
+  }
+
+  const onConnectionUpdate = ({ connection, lastDisconnect, receivedPendingNotifications }) => {
+    if (receivedPendingNotifications) {
+      synced = true;
+      onSynced?.(true);
+    }
+    if (connection === 'close') {
+      connectionLost = true;
+      sendGuard.onDisconnect(statusCodeOf(lastDisconnect?.error));
+      onAllDelivered?.(); // ohne Verbindung kommt keine Bestätigung mehr
+      onSynced?.(false);
+    }
+    if (connection === 'open') {
+      connectionLost = false;
+      sendGuard.onReconnect();
+    }
+  };
+  // Einzelchats melden Zustellung über messages.update, Gruppen pro Mitglied über message-receipt.update.
+  const onMessagesUpdate = (updates) => {
+    for (const { key, update } of updates) {
+      if (update?.status >= WAMessageStatus.DELIVERY_ACK) markDelivered(key?.id);
+    }
+  };
+  const onReceiptUpdate = (updates) => {
+    for (const { key, receipt } of updates) {
+      if (receipt?.receiptTimestamp || receipt?.readTimestamp) markDelivered(key?.id);
+    }
   };
   socket.ev.on('connection.update', onConnectionUpdate);
+  socket.ev.on('messages.update', onMessagesUpdate);
+  socket.ev.on('message-receipt.update', onReceiptUpdate);
+
+  /**
+   * Vor dem Schließen auf die Zustellbestätigung warten. `sendMessage` kehrt zurück,
+   * sobald die Nachricht auf dem Websocket liegt – Retry-Anfragen eines Empfängers,
+   * der nicht entschlüsseln konnte, treffen erst danach ein und lassen sich nur bei
+   * offener Verbindung beantworten. Zeitüberschreitung ist kein Fehler.
+   */
+  async function settle() {
+    if (settleMs <= 0 || sentCount === 0) return;
+    if (connectionLost) {
+      if (awaitingDelivery.size > 0) {
+        log.warn(`Verbindung vor der Zustellbestätigung von ${awaitingDelivery.size} Nachricht(en) verloren`);
+      }
+      return;
+    }
+    const deadline = Date.now() + settleMs;
+
+    if (awaitingDelivery.size > 0) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, settleMs);
+        onAllDelivered = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      onAllDelivered = null;
+    }
+
+    if (awaitingDelivery.size > 0) {
+      log.warn(
+        `Zustellung von ${awaitingDelivery.size} Nachricht(en) nicht bestätigt (nach ${settleMs} ms) – ` +
+          'ist das Gerät des Empfängers offline?',
+      );
+      return;
+    }
+    await delay(Math.max(0, Math.min(SETTLE_TAIL_MS, deadline - Date.now())));
+  }
 
   async function resolveRecipient(target) {
     const jid = targetJid(target);
@@ -375,12 +566,33 @@ export function buildClient(
     if (!match?.jid) {
       throw new Error(`Telefonnummer "${target.phone}" ist nicht bei WhatsApp registriert`);
     }
+    if (match.jid !== jid) log.debug(`WhatsApp-Adresse aufgelöst: ${jid} -> ${match.jid}`);
     verifiedPeople.set(jid, match.jid);
     return match.jid;
   }
 
   return {
     user: socket.user,
+
+    /**
+     * Wartet, bis WhatsApp die aufgelaufenen Offline-Nachrichten zugestellt hat.
+     * @returns {Promise<boolean>} true = abgeschlossen; false = Zeitüberschreitung oder Verbindung weg
+     */
+    waitUntilSynced(timeoutMs) {
+      if (synced) return Promise.resolve(true);
+      if (connectionLost) return Promise.resolve(false);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          onSynced = null;
+          resolve(false);
+        }, timeoutMs);
+        onSynced = (result) => {
+          clearTimeout(timer);
+          onSynced = null;
+          resolve(result);
+        };
+      });
+    },
 
     /**
      * Textnachricht senden.
@@ -392,7 +604,13 @@ export function buildClient(
       try {
         const jid = typeof target === 'string' ? target : await resolveRecipient(target);
         const result = await sendGuard.send(jid, text, () => socket.sendMessage(jid, { text }));
-        return result?.key?.id ?? null;
+        const id = result?.key?.id ?? null;
+        if (id) {
+          messageStore.remember(id, result.message);
+          sentCount += 1;
+          if (!delivered.has(id)) awaitingDelivery.add(id);
+        }
+        return id;
       } catch (error) {
         throw new Error(
           `Nachricht an "${address}" konnte nicht gesendet werden: ${error.message}\n` +
@@ -411,11 +629,26 @@ export function buildClient(
     async close() {
       if (closed) return;
       closed = true;
+      try {
+        await settle();
+      } catch (error) {
+        log.warn(`Warten auf Zustellbestätigung fehlgeschlagen: ${error.message}`);
+      }
       socket.ev.off('connection.update', onConnectionUpdate);
+      socket.ev.off('messages.update', onMessagesUpdate);
+      socket.ev.off('message-receipt.update', onReceiptUpdate);
       try {
         safeEnd(socket);
         if (persistCredentials) socket.ev.off('creds.update', persistCredentials);
         await flushCredentials();
+        // Erst nach erfolgreichem Schreiben der Zugangsdaten und noch unter der Sperre.
+        if (afterClose) {
+          try {
+            await afterClose();
+          } catch (error) {
+            log.warn(`Nachbereitung der Session fehlgeschlagen: ${error.message}`);
+          }
+        }
       } finally {
         releaseLock();
       }

@@ -17,6 +17,11 @@ Cronjob – siehe [Automatisierung](#automatisierung).
   Gruppen und Einzelpersonen gehen
 - **Konservativer Sendeschutz** – `baileys-antiban` begrenzt und verteilt
   ausgehende Nachrichten zeitlich, ohne deren Inhalt zu verändern
+- **Verlässlicher Versand** – nach dem Senden bleibt die Verbindung offen, bis der
+  Empfänger die Nachricht bestätigt hat; Entschlüsselungs-Retries werden beantwortet
+- **Session-Pflege** – Keepalive-Verbindung bei langen Sendepausen, atomar
+  geschriebene Zugangsdaten und automatische Sicherungen der Kopplung, siehe
+  [Session-Pflege](#session-pflege)
 - **Kalenderquelle austauschbar** – lokale ICS-Datei oder CalDAV/Nextcloud
 - **Gezielte Auswahl** – nur Termine, die per Kategorie (`WhatsApp`) und/oder
   Titel-Präfix (`[WA]`) markiert sind; abschaltbar, dann zählen alle Termine
@@ -523,6 +528,11 @@ sudo systemctl start chatendar.service  # sofort einmal ausführen
 
 Passend dazu in der `.env`: `CHECK_WINDOW_MINUTES=30`.
 
+Bei `ProtectSystem=strict` müssen alle Ordner beschreibbar sein, die der Bot
+anfasst: `AUTH_DIR`, `data/` (State, Log, Standard-Ordner der Session-Sicherungen)
+und ein abweichend gesetztes `SESSION_BACKUP_DIR`. Jeder Lauf prüft am Ende
+außerdem, ob ein [Keepalive](#keepalive) fällig ist.
+
 ### Cronjob (Alternative)
 
 ```cron
@@ -534,6 +544,82 @@ Cron startet mit minimalem Environment – deshalb das `cd`, damit `.env`,
 noch laufender Durchlauf vom nächsten Cron-Termin überlappt wird. Zusätzlich
 sperrt chatendar den jeweiligen Session-Ordner während einer WhatsApp-Verbindung.
 
+## Session-Pflege
+
+Die Kopplung steckt in `AUTH_DIR` (Standard `auth_session/`). Geht sie verloren,
+muss neu gekoppelt werden. Gegen die vermeidbaren Ursachen gibt es drei Maßnahmen.
+
+### Keepalive
+
+Der Bot verbindet sich nur, wenn etwas zu senden ist. Bei seltenen Erinnerungen
+kann die Session so lange ungenutzt bleiben. Deshalb öffnet jeder normale Lauf am
+Ende die WhatsApp-Verbindung kurz ohne zu senden, wenn die letzte Verbindung
+länger als `KEEPALIVE_DAYS` (Standard 7, `0` = aus) zurückliegt. Der Heartbeat
+arbeitet auch die auf dem Server wartenden Nachrichten ab und meldet eine
+Abmeldung über Exit-Code 1, sodass Monitoring sie sofort sieht. Nach einem Versuch
+wird erst nach 6 Stunden ein neuer gestartet, damit ein Dauerfehler nicht im
+Cron-Takt bei WhatsApp anklopft. Profile mit `DRY_RUN=true` sind ausgenommen.
+
+Manuell, unabhängig von Fälligkeit und Kalender:
+
+```bash
+npm run keepalive
+```
+
+Der Zeitpunkt der letzten Verbindung steht in `auth_session/chatendar-session.json`.
+Ob WhatsApp die Inaktivitäts-Abmeldung an der Verbindung festmacht, ist nicht
+dokumentiert. Der Keepalive ist deshalb eine Absicherung und vor allem eine
+Früherkennung, keine Garantie. Ohne Bot-Einfluss bleibt: Das Handy muss regelmäßig
+online sein (WhatsApp meldet verknüpfte Geräte nach etwa 14 Tagen Handy-Inaktivität
+ab), und die Kopplung darf am Handy nicht entfernt werden.
+
+Für Benachrichtigung bei Fehlern im systemd-Betrieb in `chatendar.service`
+`OnFailure=` auf einen Dienst setzen, der eine Nachricht verschickt; bei Cron
+sorgt `MAILTO=` für Mails bei Ausgabe auf stderr.
+
+### Automatische Sicherung
+
+Nach einer erfolgreichen Verbindung wird `AUTH_DIR` höchstens einmal täglich nach
+`SESSION_BACKUP_DIR` (Standard `./data/session-backups/`) kopiert. Bewahrt werden
+die letzten `SESSION_BACKUP_KEEP` Stände (Standard 7, `0` = aus). Gesichert wird
+erst, nachdem die Zugangsdaten sicher geschrieben wurden, und nie während
+Baileys noch schreibt. Nach dem Koppeln wird sofort gesichert.
+
+Unabhängig davon schreibt der Bot `creds.json` atomar und hält die letzte gültige
+Fassung als `creds.json.bak` vor. Ist die Datei beim Start beschädigt (Absturz oder
+Stromausfall beim Schreiben), wird sie daraus wiederhergestellt; die defekte Datei
+bleibt als `creds.json.corrupt` liegen. Eine bewusst gelöschte `creds.json` wird
+nicht wiederhergestellt.
+
+Die Sicherung enthält vollen Zugriff auf das WhatsApp-Konto: nicht ins Repo, nicht
+in eine Cloud-Synchronisation, Ordnerrechte bleiben `700`. Gegen Plattenausfall
+`SESSION_BACKUP_DIR` auf ein anderes Laufwerk legen.
+
+Wiederherstellen (Timer vorher stoppen):
+
+```bash
+systemctl stop chatendar.timer
+mv auth_session auth_session.defekt
+cp -a data/session-backups/auth_session-<hash>/<zeitstempel> auth_session
+systemctl start chatendar.timer
+npm run keepalive   # prüft die wiederhergestellte Session
+```
+
+Das stellt Identität und Registrierung wieder her und erspart das Neu-Koppeln.
+Gespeicherte Chat-Sitzungen können veraltet sein; sie werden über den
+Retry-Mechanismus bei Bedarf neu ausgehandelt. Immer die neueste Sicherung nehmen.
+
+### Was sonst zur Abmeldung führt
+
+- Dieselbe Session gleichzeitig an zwei Orten (zweiter Rechner, Kopie, Docker
+  neben dem Dienst): WhatsApp trennt eine Verbindung, und die Verschlüsselungszustände
+  laufen auseinander. Immer nur ein Prozess pro Session.
+- `AUTH_DIR` nicht beschreibbar (z. B. `ProtectSystem` ohne `ReadWritePaths`) oder ein
+  anderes Arbeitsverzeichnis im Cron bei relativem Pfad: absoluten Pfad verwenden.
+- Am Handy „Verknüpfte Geräte" entfernt, WhatsApp neu installiert oder die Nummer
+  neu registriert: dann hilft nur Neu-Koppeln (alte Einträge in „Verknüpfte
+  Geräte" dabei entfernen).
+
 ## Bedienung
 
 ```bash
@@ -543,6 +629,7 @@ node src/index.js [Optionen]
 | Option             | Wirkung                                                   |
 | ------------------ | --------------------------------------------------------- |
 | `--preview [Tage]` | Anzeigen, was ansteht und wann es rausgeht (Default 14)    |
+| `--keepalive`    | Nur WhatsApp verbinden und schließen, nichts senden          |
 | `--dry-run`      | Nachrichten nur anzeigen, nichts senden                      |
 | `--live`         | Tatsächlich senden (überschreibt `DRY_RUN=true`)             |
 | `--now <ISO>`    | Referenzzeitpunkt setzen, z. B. `2026-09-19T17:00:00Z`       |
@@ -551,7 +638,7 @@ node src/index.js [Optionen]
 | `--quiet`, `-q`  | Nur Warnungen und Fehler                                     |
 | `--help`, `-h`   | Hilfe                                                        |
 
-Exit-Code `0` bei Erfolg, `1` bei Fehlern (Konfiguration, Kalender, Versand) –
+Exit-Code `0` bei Erfolg, `1` bei Fehlern (Konfiguration, Kalender, Versand, Keepalive) –
 für Monitoring auswertbar.
 
 ### Einstellungen im Browser
@@ -717,7 +804,10 @@ npm test
 Die Tests laufen ohne WhatsApp-Verbindung: ICS-Parsing, Selektion,
 Vorlaufzeiten, Bündelung, Templates und State werden isoliert geprüft, dazu
 ein kompletter Dry-Run als eigener Prozess gegen
-`test/fixtures/beispiel.ics`.
+`test/fixtures/beispiel.ics`. Der WhatsApp-Client, der Sendeschutz, Keepalive und
+Session-Sicherung laufen gegen Attrappen des Baileys-Sockets. Ob eine Nachricht
+beim Empfänger tatsächlich lesbar ankommt, lässt sich nur mit einem echten
+Testversand prüfen (siehe [Fehlersuche](#fehlersuche-warte-auf-diese-nachricht)).
 
 ## Projektstruktur
 
@@ -738,6 +828,8 @@ src/
     whatsappClient.js     Baileys-Wrapper
     whatsappTarget.js     Telefonnummern und Ziel-JIDs normalisieren
     sendGuard.js          Konservatives Rate-Limit/Jitter
+    keepalive.js          Heartbeat-Verbindung ohne Versand
+    sessionMaintenance.js Verbindungsprotokoll und Sicherung von AUTH_DIR
   state/
     db.js                 SQLite-Zugriff
   util/
@@ -777,6 +869,40 @@ Serienterminen.
   Instanz im Abfragefenster liegt
 - Baileys nutzt das inoffizielle WhatsApp-Protokoll; auch der Sendeschutz kann
   Sperren nicht ausschließen (siehe Hinweis oben)
+- Der Keepalive ist eine Absicherung, keine Garantie: Abmeldungen durch WhatsApp
+  (Handy lange inaktiv, Gerät entfernt, Konto eingeschränkt) lassen sich nicht
+  verhindern, nur früh erkennen
+- Gesendete Nachrichten für Retry-Anfragen werden nur bis zum Ende des Laufs
+  vorgehalten; ein Retry, der erst später eintrifft, kann nicht beantwortet werden
+- Die Session-Sperre prüft Prozesse per PID. Sie schützt vor überlappenden Läufen
+  auf einem Rechner, nicht vor mehreren Containern oder Rechnern mit derselben
+  Session. Dieselbe Session darf nie an zwei Orten gleichzeitig laufen
+
+## Fehlersuche: „Warte auf diese Nachricht"
+
+Sieht ein Empfänger nur „Warte auf diese Nachricht. Das kann einen Moment
+dauern", konnte sein Gerät die Nachricht nicht entschlüsseln. WhatsApp fordert
+dann vom Absender einen erneuten Versand an (Retry). Das klappt nur, wenn der
+Bot nach dem Senden noch verbunden ist. Deshalb wartet der Bot nach dem letzten
+Senden bis zu `SEND_SETTLE_MS` (Standard 10 s) auf die Zustellbestätigung und
+hält gesendete Nachrichten für Retries vor. `SEND_SETTLE_MS=0` schaltet das ab
+und sollte nicht gesetzt werden.
+
+Zur Analyse lässt sich das Baileys-Protokoll mitschreiben:
+
+```bash
+BAILEYS_LOG_LEVEL=debug npm start   # schreibt nach ./data/baileys.log
+grep -i "retry" data/baileys.log
+```
+
+„recv retry request" gefolgt von einem erneuten Versand ist der Normalfall;
+„message not available" zeigt, dass ein Retry nicht beantwortet werden konnte.
+Die Log-Datei enthält Rufnummern und darf nicht weitergegeben werden.
+
+Hilft das nicht und betrifft es nur einen Empfänger, kann dessen gespeicherte
+Signal-Sitzung desynchronisiert sein: `auth_session/` sichern, dann die Dateien
+`session-<nummer>.*` dieses Empfängers löschen. Beim nächsten Versand wird eine
+frische Sitzung ausgehandelt.
 
 ## Lizenz
 

@@ -14,6 +14,7 @@
  *   6. Fällige Erinnerungen je Vorlaufzeit-Stufe zu einer Nachricht bündeln
  *   7. Wochenübersicht prüfen, falls aktiviert
  *   8. Senden (oder im Dry-Run nur loggen) und State fortschreiben
+ *   9. Keepalive, falls lange keine WhatsApp-Verbindung bestand (KEEPALIVE_DAYS)
  */
 
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ import { buildReminders, evaluateReminders, SKIP_REASONS } from './reminders/sch
 import { groupReminders } from './reminders/batching.js';
 import { evaluateDigest, eventsInRange, nextScheduledInstant } from './reminders/digest.js';
 import { buildDigestMessage, buildGroupMessage, formatRangeLabel } from './messaging/templateRenderer.js';
+import { runKeepalives } from './messaging/keepalive.js';
 import { createWhatsAppClient } from './messaging/whatsappClient.js';
 import { targetAddress, targetKindLabel } from './messaging/whatsappTarget.js';
 import { openDatabase, SENT_STATUS } from './state/db.js';
@@ -371,7 +373,7 @@ async function runProfile(profile, now) {
  * Einen kompletten Durchlauf ausführen.
  * @returns {Promise<number>} Exit-Code
  */
-export async function run(argv = process.argv.slice(2)) {
+export async function run(argv = process.argv.slice(2), { createClient } = {}) {
   const args = parseArgs(argv);
   if (args.help) {
     console.log(USAGE);
@@ -382,6 +384,13 @@ export async function run(argv = process.argv.slice(2)) {
   setLevel(args.logLevel ?? runtime.logLevel);
 
   const now = args.now ?? new Date();
+
+  if (args.keepalive) {
+    log.section('Keepalive');
+    const code = await runKeepalives(runtime.enabledProfiles, { now, force: true, createClient });
+    log.section('Lauf beendet');
+    return code;
+  }
 
   if (args.preview !== null) {
     let exitCode = 0;
@@ -406,6 +415,11 @@ export async function run(argv = process.argv.slice(2)) {
     }
     if (profileExit !== 0) exitCode = profileExit;
   }
+
+  // Lange keine Verbindung gehabt (z. B. weil nichts zu senden war)? Dann jetzt Heartbeat.
+  const keepaliveExit = await runKeepalives(runtime.enabledProfiles, { now, createClient });
+  if (keepaliveExit !== 0) exitCode = keepaliveExit;
+
   log.section('Lauf beendet');
   return exitCode;
 }
